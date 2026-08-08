@@ -1,8 +1,13 @@
 package com.is2205.moderntexteditor
 
+import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,12 +24,13 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import com.is2205.moderntexteditor.ui.theme.ModernTextEditorTheme
 
 class MainActivity : ComponentActivity() {
@@ -44,60 +50,212 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun EditorScreen() {
 
-    var fileName by rememberSaveable {
+    val context = LocalContext.current
+
+    var fileName by remember {
         mutableStateOf("untitled.txt")
     }
 
-    var editorText by rememberSaveable {
+    var editorText by remember {
         mutableStateOf("")
     }
 
-    var statusMessage by rememberSaveable {
+    var statusMessage by remember {
         mutableStateOf("Ready")
     }
 
+    // Stores the currently opened/saved file location.
+    var currentFileUri by remember {
+        mutableStateOf<Uri?>(null)
+    }
+
+    // -------------------------
+    // OPEN FILE
+    // -------------------------
+
+    val openFileLauncher =
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
+
+            if (uri != null) {
+
+                try {
+
+                    val text =
+                        context.contentResolver
+                            .openInputStream(uri)
+                            ?.bufferedReader()
+                            ?.use {
+                                it.readText()
+                            }
+
+                    if (text != null) {
+
+                        editorText = text
+
+                        fileName =
+                            getFileName(
+                                context,
+                                uri
+                            ) ?: "unknown.txt"
+
+                        currentFileUri = uri
+
+                        statusMessage =
+                            "File opened successfully"
+                    }
+
+                } catch (e: Exception) {
+
+                    statusMessage =
+                        "Unable to open file"
+                }
+            }
+        }
+
+    // -------------------------
+    // SAVE AS
+    // -------------------------
+
+    val saveAsLauncher =
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.CreateDocument(
+                "*/*"
+            )
+        ) { uri ->
+
+            if (uri != null) {
+
+                try {
+
+                    saveTextToFile(
+                        context = context,
+                        uri = uri,
+                        text = editorText
+                    )
+
+                    currentFileUri = uri
+
+                    fileName =
+                        getFileName(
+                            context,
+                            uri
+                        ) ?: fileName
+
+                    statusMessage =
+                        "File saved successfully"
+
+                } catch (e: Exception) {
+
+                    statusMessage =
+                        "Unable to save file"
+                }
+            }
+        }
+
     Scaffold(
+
         modifier = Modifier.fillMaxSize(),
 
         topBar = {
+
             TopAppBar(
+
                 title = {
-                    Text(text = "Modern Text Editor")
+                    Text("Modern Text Editor")
                 },
 
                 actions = {
 
+                    // NEW
                     TextButton(
                         onClick = {
-                            fileName = "untitled.txt"
+
                             editorText = ""
-                            statusMessage = "New file created"
+
+                            fileName =
+                                "untitled.txt"
+
+                            currentFileUri =
+                                null
+
+                            statusMessage =
+                                "New file created"
                         }
                     ) {
                         Text("New")
                     }
 
+                    // OPEN
                     TextButton(
                         onClick = {
-                            statusMessage = "Open function will be added next"
+
+                            openFileLauncher.launch(
+                                arrayOf(
+                                    "text/plain",
+                                    "text/markdown",
+                                    "application/octet-stream"
+                                )
+                            )
                         }
                     ) {
                         Text("Open")
                     }
 
+                    // SAVE
                     TextButton(
                         onClick = {
-                            statusMessage = "Save function will be added next"
+
+                            if (currentFileUri != null) {
+
+                                try {
+
+                                    saveTextToFile(
+                                        context = context,
+                                        uri = currentFileUri!!,
+                                        text = editorText
+                                    )
+
+                                    statusMessage =
+                                        "File saved"
+
+                                } catch (e: Exception) {
+
+                                    statusMessage =
+                                        "Unable to save file"
+                                }
+
+                            } else {
+
+                                saveAsLauncher.launch(
+                                    fileName
+                                )
+                            }
                         }
                     ) {
                         Text("Save")
                     }
+
+                    // SAVE AS
+                    TextButton(
+                        onClick = {
+
+                            saveAsLauncher.launch(
+                                fileName
+                            )
+                        }
+                    ) {
+                        Text("Save As")
+                    }
                 }
             )
         }
+
     ) { innerPadding ->
 
         Column(
+
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
@@ -105,6 +263,7 @@ fun EditorScreen() {
         ) {
 
             OutlinedTextField(
+
                 value = fileName,
 
                 onValueChange = {
@@ -123,20 +282,31 @@ fun EditorScreen() {
             )
 
             TextField(
+
                 value = editorText,
 
                 onValueChange = {
+
                     editorText = it
-                    statusMessage = "Editing"
+
+                    statusMessage =
+                        "Editing"
                 },
 
                 placeholder = {
-                    Text("Start typing here...")
+                    Text(
+                        "Start typing here..."
+                    )
                 },
 
-                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    fontFamily = FontFamily.Monospace
-                ),
+                textStyle =
+                    MaterialTheme
+                        .typography
+                        .bodyLarge
+                        .copy(
+                            fontFamily =
+                                FontFamily.Monospace
+                        ),
 
                 modifier = Modifier
                     .fillMaxWidth()
@@ -144,27 +314,95 @@ fun EditorScreen() {
             )
 
             Row(
+
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp)
             ) {
 
                 Text(
-                    text = statusMessage,
-                    modifier = Modifier.weight(1f)
+
+                    text =
+                        statusMessage,
+
+                    modifier =
+                        Modifier.weight(1f)
                 )
 
                 Text(
-                    text = "Characters: ${editorText.length}"
+                    text =
+                        "Characters: ${editorText.length}"
                 )
             }
         }
     }
 }
 
+/*
+    Saves editor text into the selected file.
+ */
+fun saveTextToFile(
+    context: Context,
+    uri: Uri,
+    text: String
+) {
+
+    context.contentResolver
+        .openOutputStream(
+            uri,
+            "wt"
+        )
+        ?.bufferedWriter()
+        ?.use { writer ->
+
+            writer.write(text)
+        }
+}
+
+/*
+    Gets the actual file name
+    from the Android file picker.
+ */
+fun getFileName(
+    context: Context,
+    uri: Uri
+): String? {
+
+    var name: String? = null
+
+    val cursor =
+        context.contentResolver.query(
+            uri,
+            null,
+            null,
+            null,
+            null
+        )
+
+    cursor?.use {
+
+        if (it.moveToFirst()) {
+
+            val nameIndex =
+                it.getColumnIndex(
+                    OpenableColumns.DISPLAY_NAME
+                )
+
+            if (nameIndex >= 0) {
+
+                name =
+                    it.getString(nameIndex)
+            }
+        }
+    }
+
+    return name
+}
+
 @Preview(showBackground = true)
 @Composable
 fun EditorScreenPreview() {
+
     ModernTextEditorTheme {
         EditorScreen()
     }
