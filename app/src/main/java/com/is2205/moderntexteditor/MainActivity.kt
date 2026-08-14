@@ -39,9 +39,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,6 +62,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.is2205.moderntexteditor.ui.theme.ModernTextEditorTheme
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -71,6 +74,17 @@ import org.json.JSONObject
 data class RecentFile(
     val name: String,
     val uri: String
+)
+
+
+// =====================================================
+// RECOVERY DRAFT MODEL
+// =====================================================
+
+data class RecoveryDraft(
+    val fileName: String,
+    val text: String,
+    val savedAt: Long
 )
 
 
@@ -105,9 +119,9 @@ fun EditorScreen() {
     val context = LocalContext.current
 
 
-    // -------------------------------------------------
+    // =================================================
     // BASIC EDITOR STATE
-    // -------------------------------------------------
+    // =================================================
 
     var fileName by remember {
         mutableStateOf("untitled.txt")
@@ -126,18 +140,35 @@ fun EditorScreen() {
     }
 
 
-    // -------------------------------------------------
-    // MENU STATE
-    // -------------------------------------------------
+    // =================================================
+    // UNSAVED / CRASH RECOVERY STATE
+    // =================================================
+
+    var isDirty by remember {
+        mutableStateOf(false)
+    }
+
+    var recoveryDraft by remember {
+        mutableStateOf(loadRecoveryDraft(context))
+    }
+
+    var showRecoveryDialog by remember {
+        mutableStateOf(recoveryDraft != null)
+    }
+
+
+    // =================================================
+    // MORE MENU
+    // =================================================
 
     var showMoreMenu by remember {
         mutableStateOf(false)
     }
 
 
-    // -------------------------------------------------
-    // RECENT FILE STATE
-    // -------------------------------------------------
+    // =================================================
+    // RECENT FILES
+    // =================================================
 
     var showRecentDialog by remember {
         mutableStateOf(false)
@@ -148,9 +179,9 @@ fun EditorScreen() {
     }
 
 
-    // -------------------------------------------------
-    // SEARCH / REPLACE STATE
-    // -------------------------------------------------
+    // =================================================
+    // SEARCH / REPLACE
+    // =================================================
 
     var showSearchDialog by remember {
         mutableStateOf(false)
@@ -169,18 +200,18 @@ fun EditorScreen() {
     }
 
 
-    // -------------------------------------------------
+    // =================================================
     // WORD WRAP
-    // -------------------------------------------------
+    // =================================================
 
     var wordWrapEnabled by remember {
         mutableStateOf(true)
     }
 
 
-    // -------------------------------------------------
+    // =================================================
     // UNDO / REDO
-    // -------------------------------------------------
+    // =================================================
 
     val undoStack = remember {
         mutableListOf<String>()
@@ -191,34 +222,23 @@ fun EditorScreen() {
     }
 
 
-    // -------------------------------------------------
-    // FILE TYPE
-    // -------------------------------------------------
+    // =================================================
+    // FILE INFORMATION
+    // =================================================
 
     val fileType = getFileType(fileName)
 
-
-    // -------------------------------------------------
-    // LINE COUNT
-    // -------------------------------------------------
-
     val lineCount =
-
         if (editorText.isEmpty()) {
-
             1
-
         } else {
-
-            editorText.count {
-                it == '\n'
-            } + 1
+            editorText.count { it == '\n' } + 1
         }
 
 
-    // -------------------------------------------------
-    // UPDATE EDITOR
-    // -------------------------------------------------
+    // =================================================
+    // UPDATE EDITOR TEXT
+    // =================================================
 
     fun updateEditorText(newText: String) {
 
@@ -227,7 +247,6 @@ fun EditorScreen() {
             undoStack.add(editorText)
 
             if (undoStack.size > 100) {
-
                 undoStack.removeAt(0)
             }
 
@@ -235,14 +254,55 @@ fun EditorScreen() {
 
             editorText = newText
 
+            isDirty = true
+
             statusMessage = "Editing"
         }
     }
 
 
-    // =====================================================
+    // =================================================
+    // AUTO-SAVE CRASH RECOVERY EVERY 10 SECONDS
+    // =================================================
+
+    val latestEditorText by rememberUpdatedState(editorText)
+
+    val latestFileName by rememberUpdatedState(fileName)
+
+    val latestIsDirty by rememberUpdatedState(isDirty)
+
+
+    LaunchedEffect(Unit) {
+
+        while (true) {
+
+            delay(10_000)
+
+            if (latestIsDirty) {
+
+                if (latestEditorText.isNotEmpty()) {
+
+                    saveRecoveryDraft(
+                        context = context,
+                        fileName = latestFileName,
+                        text = latestEditorText
+                    )
+
+                    statusMessage =
+                        "Recovery auto-saved"
+
+                } else {
+
+                    clearRecoveryDraft(context)
+                }
+            }
+        }
+    }
+
+
+    // =================================================
     // OPEN FILE
-    // =====================================================
+    // =================================================
 
     val openFileLauncher =
         rememberLauncherForActivityResult(
@@ -255,16 +315,14 @@ fun EditorScreen() {
 
                     try {
 
-                        context.contentResolver.takePersistableUriPermission(
-
-                            uri,
-
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                        )
+                        context.contentResolver
+                            .takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            )
 
                     } catch (_: Exception) {
-
                     }
 
 
@@ -289,6 +347,12 @@ fun EditorScreen() {
                             ) ?: "unknown.txt"
 
                         currentFileUri = uri
+
+                        isDirty = false
+
+                        clearRecoveryDraft(context)
+
+                        recoveryDraft = null
 
 
                         addRecentFile(
@@ -315,16 +379,14 @@ fun EditorScreen() {
         }
 
 
-    // =====================================================
+    // =================================================
     // SAVE AS
-    // =====================================================
+    // =================================================
 
     val saveAsLauncher =
         rememberLauncherForActivityResult(
-
             contract =
                 ActivityResultContracts.CreateDocument("*/*")
-
         ) { uri ->
 
             if (uri != null) {
@@ -359,6 +421,13 @@ fun EditorScreen() {
                         loadRecentFiles(context)
 
 
+                    isDirty = false
+
+                    clearRecoveryDraft(context)
+
+                    recoveryDraft = null
+
+
                     statusMessage =
                         "File saved successfully"
 
@@ -371,9 +440,9 @@ fun EditorScreen() {
         }
 
 
-    // =====================================================
-    // SAVE FUNCTION
-    // =====================================================
+    // =================================================
+    // SAVE CURRENT FILE
+    // =================================================
 
     fun saveCurrentFile() {
 
@@ -399,6 +468,13 @@ fun EditorScreen() {
                     loadRecentFiles(context)
 
 
+                isDirty = false
+
+                clearRecoveryDraft(context)
+
+                recoveryDraft = null
+
+
                 statusMessage =
                     "File saved"
 
@@ -417,9 +493,9 @@ fun EditorScreen() {
     }
 
 
-    // =====================================================
+    // =================================================
     // MAIN UI
-    // =====================================================
+    // =================================================
 
     Scaffold(
 
@@ -437,46 +513,62 @@ fun EditorScreen() {
                         Text(
                             text = "Modern Text Editor",
                             style =
-                                MaterialTheme.typography.titleMedium
+                                MaterialTheme
+                                    .typography
+                                    .titleMedium
                         )
 
+
                         Text(
-                            text = fileName,
+                            text =
+                                if (isDirty) {
+                                    "$fileName *"
+                                } else {
+                                    fileName
+                                },
+
                             style =
-                                MaterialTheme.typography.bodySmall
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall
                         )
                     }
                 },
 
                 actions = {
 
-                    // ---------------------------------
-                    // SAVE - PRIMARY ACTION
-                    // ---------------------------------
+
+                    // =================================================
+                    // SAVE BUTTON
+                    // =================================================
 
                     TextButton(
+
                         onClick = {
 
                             saveCurrentFile()
                         }
+
                     ) {
 
                         Text("Save")
                     }
 
 
-                    // ---------------------------------
+                    // =================================================
                     // MORE MENU
-                    // ---------------------------------
+                    // =================================================
 
                     Box {
 
+
                         TextButton(
+
                             onClick = {
 
-                                showMoreMenu =
-                                    true
+                                showMoreMenu = true
                             }
+
                         ) {
 
                             Text("More")
@@ -497,7 +589,9 @@ fun EditorScreen() {
                         ) {
 
 
-                            // NEW
+                            // -----------------------------------------
+                            // NEW FILE
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
@@ -513,6 +607,7 @@ fun EditorScreen() {
                                     showMoreMenu =
                                         false
 
+
                                     editorText = ""
 
                                     fileName =
@@ -521,8 +616,27 @@ fun EditorScreen() {
                                     currentFileUri =
                                         null
 
+
                                     undoStack.clear()
                                     redoStack.clear()
+
+
+                                    isDirty =
+                                        false
+
+
+                                    clearRecoveryDraft(
+                                        context
+                                    )
+
+
+                                    recoveryDraft =
+                                        null
+
+
+                                    showRecoveryDialog =
+                                        false
+
 
                                     statusMessage =
                                         "New file created"
@@ -530,7 +644,9 @@ fun EditorScreen() {
                             )
 
 
-                            // OPEN
+                            // -----------------------------------------
+                            // OPEN FILE
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
@@ -546,14 +662,12 @@ fun EditorScreen() {
                                     showMoreMenu =
                                         false
 
+
                                     openFileLauncher.launch(
 
                                         arrayOf(
-
                                             "text/plain",
-
                                             "text/markdown",
-
                                             "application/octet-stream"
                                         )
                                     )
@@ -561,7 +675,9 @@ fun EditorScreen() {
                             )
 
 
-                            // RECENT
+                            // -----------------------------------------
+                            // RECENT FILES
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
@@ -577,10 +693,12 @@ fun EditorScreen() {
                                     showMoreMenu =
                                         false
 
+
                                     recentFiles =
                                         loadRecentFiles(
                                             context
                                         )
+
 
                                     showRecentDialog =
                                         true
@@ -588,7 +706,9 @@ fun EditorScreen() {
                             )
 
 
+                            // -----------------------------------------
                             // SAVE AS
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
@@ -604,6 +724,7 @@ fun EditorScreen() {
                                     showMoreMenu =
                                         false
 
+
                                     saveAsLauncher.launch(
                                         fileName
                                     )
@@ -611,7 +732,9 @@ fun EditorScreen() {
                             )
 
 
+                            // -----------------------------------------
                             // FIND / REPLACE
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
@@ -627,8 +750,10 @@ fun EditorScreen() {
                                     showMoreMenu =
                                         false
 
+
                                     searchResultMessage =
                                         ""
+
 
                                     showSearchDialog =
                                         true
@@ -636,15 +761,15 @@ fun EditorScreen() {
                             )
 
 
+                            // -----------------------------------------
                             // UNDO
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
                                 text = {
 
-                                    Text(
-                                        "Undo"
-                                    )
+                                    Text("Undo")
                                 },
 
                                 onClick = {
@@ -654,7 +779,8 @@ fun EditorScreen() {
 
 
                                     if (
-                                        undoStack.isNotEmpty()
+                                        undoStack
+                                            .isNotEmpty()
                                     ) {
 
                                         redoStack.add(
@@ -666,6 +792,10 @@ fun EditorScreen() {
                                             undoStack.removeAt(
                                                 undoStack.lastIndex
                                             )
+
+
+                                        isDirty =
+                                            true
 
 
                                         statusMessage =
@@ -680,15 +810,15 @@ fun EditorScreen() {
                             )
 
 
+                            // -----------------------------------------
                             // REDO
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
                                 text = {
 
-                                    Text(
-                                        "Redo"
-                                    )
+                                    Text("Redo")
                                 },
 
                                 onClick = {
@@ -698,7 +828,8 @@ fun EditorScreen() {
 
 
                                     if (
-                                        redoStack.isNotEmpty()
+                                        redoStack
+                                            .isNotEmpty()
                                     ) {
 
                                         undoStack.add(
@@ -710,6 +841,10 @@ fun EditorScreen() {
                                             redoStack.removeAt(
                                                 redoStack.lastIndex
                                             )
+
+
+                                        isDirty =
+                                            true
 
 
                                         statusMessage =
@@ -724,7 +859,9 @@ fun EditorScreen() {
                             )
 
 
+                            // -----------------------------------------
                             // WORD WRAP
+                            // -----------------------------------------
 
                             DropdownMenuItem(
 
@@ -790,7 +927,7 @@ fun EditorScreen() {
 
 
             // =================================================
-            // FILE INFORMATION CARD
+            // FILE INFO CARD
             // =================================================
 
             Surface(
@@ -842,7 +979,8 @@ fun EditorScreen() {
                             true,
 
                         modifier =
-                            Modifier.fillMaxWidth()
+                            Modifier
+                                .fillMaxWidth()
                     )
 
 
@@ -869,7 +1007,6 @@ fun EditorScreen() {
 
 
                         FileTypeBadge(
-
                             fileType =
                                 fileType
                         )
@@ -880,7 +1017,8 @@ fun EditorScreen() {
                             text =
 
                                 if (
-                                    currentFileUri == null
+                                    currentFileUri ==
+                                    null
                                 ) {
 
                                     "New file"
@@ -895,6 +1033,24 @@ fun EditorScreen() {
                                     .typography
                                     .bodySmall
                         )
+
+
+                        if (isDirty) {
+
+                            Text(
+
+                                text =
+                                    "Unsaved",
+
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .labelSmall,
+
+                                fontWeight =
+                                    FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -950,7 +1106,7 @@ fun EditorScreen() {
 
 
             // =================================================
-            // BOTTOM STATUS BAR
+            // STATUS BAR
             // =================================================
 
             Surface(
@@ -982,7 +1138,8 @@ fun EditorScreen() {
                             ),
 
                     horizontalArrangement =
-                        Arrangement.SpaceBetween,
+                        Arrangement
+                            .SpaceBetween,
 
                     verticalAlignment =
                         Alignment.CenterVertically
@@ -1062,6 +1219,193 @@ fun EditorScreen() {
                 }
             }
         }
+    }
+
+
+    // =====================================================
+    // CRASH RECOVERY DIALOG
+    // =====================================================
+
+    if (
+        showRecoveryDialog &&
+        recoveryDraft != null
+    ) {
+
+
+        AlertDialog(
+
+            onDismissRequest = {
+            },
+
+            title = {
+
+                Text(
+                    "Recover Unsaved Work?"
+                )
+            },
+
+            text = {
+
+                Column {
+
+
+                    Text(
+                        "The editor found an auto-saved document that was not saved normally."
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+
+                    Text(
+
+                        text =
+                            "File: ${recoveryDraft!!.fileName}",
+
+                        fontWeight =
+                            FontWeight.Bold
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                8.dp
+                            )
+                    )
+
+
+                    Text(
+                        "Preview:"
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                4.dp
+                            )
+                    )
+
+
+                    Text(
+
+                        text =
+
+                            if (
+                                recoveryDraft!!
+                                    .text
+                                    .length >
+                                200
+                            ) {
+
+                                recoveryDraft!!
+                                    .text
+                                    .take(200) +
+                                        "..."
+
+                            } else {
+
+                                recoveryDraft!!
+                                    .text
+                            }
+                    )
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+
+                    onClick = {
+
+
+                        val draft =
+                            recoveryDraft
+
+
+                        if (
+                            draft != null
+                        ) {
+
+
+                            editorText =
+                                draft.text
+
+
+                            fileName =
+                                draft.fileName
+
+
+                            currentFileUri =
+                                null
+
+
+                            undoStack.clear()
+                            redoStack.clear()
+
+
+                            isDirty =
+                                true
+
+
+                            statusMessage =
+                                "Recovered unsaved draft"
+                        }
+
+
+                        showRecoveryDialog =
+                            false
+                    }
+
+                ) {
+
+                    Text(
+                        "Recover"
+                    )
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+
+                    onClick = {
+
+
+                        clearRecoveryDraft(
+                            context
+                        )
+
+
+                        recoveryDraft =
+                            null
+
+
+                        showRecoveryDialog =
+                            false
+
+
+                        statusMessage =
+                            "Recovery discarded"
+                    }
+
+                ) {
+
+                    Text(
+                        "Discard"
+                    )
+                }
+            }
+        )
     }
 
 
@@ -1153,6 +1497,19 @@ fun EditorScreen() {
 
                                                     currentFileUri =
                                                         uri
+
+
+                                                    isDirty =
+                                                        false
+
+
+                                                    clearRecoveryDraft(
+                                                        context
+                                                    )
+
+
+                                                    recoveryDraft =
+                                                        null
 
 
                                                     addRecentFile(
@@ -1283,7 +1640,7 @@ fun EditorScreen() {
                     )
 
 
-                    // FIND
+                    // FIND TEXT
 
                     OutlinedTextField(
 
@@ -1294,6 +1651,7 @@ fun EditorScreen() {
 
                             searchText =
                                 it
+
 
                             searchResultMessage =
                                 ""
@@ -1323,7 +1681,7 @@ fun EditorScreen() {
                     )
 
 
-                    // REPLACE
+                    // REPLACE TEXT
 
                     OutlinedTextField(
 
@@ -1381,7 +1739,7 @@ fun EditorScreen() {
                     }
 
 
-                    // FIND + REPLACE
+                    // FIND / REPLACE FIRST
 
                     Row(
 
@@ -1431,7 +1789,6 @@ fun EditorScreen() {
                             }
 
                         ) {
-
 
                             Text(
                                 "Find"
@@ -1497,7 +1854,6 @@ fun EditorScreen() {
 
                         ) {
 
-
                             Text(
                                 "Replace"
                             )
@@ -1505,7 +1861,7 @@ fun EditorScreen() {
                     }
 
 
-                    // REPLACE ALL + CLOSE
+                    // REPLACE ALL / CLOSE
 
                     Row(
 
@@ -1572,7 +1928,6 @@ fun EditorScreen() {
 
                         ) {
 
-
                             Text(
                                 "Replace All"
                             )
@@ -1588,7 +1943,6 @@ fun EditorScreen() {
                             }
 
                         ) {
-
 
                             Text(
                                 "Close"
@@ -1699,7 +2053,7 @@ fun getFileType(
 
 
 // =====================================================
-// EDITOR AREA
+// EDITOR TEXT AREA
 // =====================================================
 
 @Composable
@@ -1753,7 +2107,8 @@ fun EditorTextArea(
                 )
 
 
-    val syntaxTransformation: VisualTransformation =
+    val syntaxTransformation:
+            VisualTransformation =
 
 
         when {
@@ -1872,8 +2227,6 @@ fun EditorTextArea(
             }
 
 
-        // WORD WRAP ON
-
         if (
             wordWrapEnabled
         ) {
@@ -1914,8 +2267,6 @@ fun EditorTextArea(
 
         } else {
 
-
-            // WORD WRAP OFF
 
             Box(
 
@@ -2121,7 +2472,7 @@ class KotlinSyntaxVisualTransformation(
             }
 
 
-            // TRIPLE QUOTED STRING
+            // TRIPLE-QUOTED STRING
 
             if (
                 source.startsWith(
@@ -2284,6 +2635,7 @@ class KotlinSyntaxVisualTransformation(
                     builder.addStyle(
 
                         SpanStyle(
+
                             color =
                                 annotationColor,
 
@@ -2353,6 +2705,7 @@ class KotlinSyntaxVisualTransformation(
                     builder.addStyle(
 
                         SpanStyle(
+
                             color =
                                 keywordColor,
 
@@ -2435,13 +2788,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """(?m)^(#{1,6})[ \t]+.*$"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2466,13 +2814,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """(?m)^[ \t]*>[ \t]?.*$"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2497,13 +2840,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """(?m)^[ \t]*[-+*][ \t]+"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2528,13 +2866,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """(?m)^[ \t]*\d+\.[ \t]+"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2559,13 +2892,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """\[[^\]\n]+\]\([^\)\n]+\)"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2590,13 +2918,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """\*\*[^*\n]+\*\*|__[^_\n]+__"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2621,13 +2944,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_)"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2652,13 +2970,8 @@ class MarkdownSyntaxVisualTransformation(
         Regex(
             """`[^`\n]+`"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2681,18 +2994,13 @@ class MarkdownSyntaxVisualTransformation(
             }
 
 
-        // CODE BLOCK
+        // FENCED CODE BLOCK
 
         Regex(
             """```[\s\S]*?```"""
         )
-            .findAll(
-                source
-            )
-            .forEach {
-
-                    match ->
-
+            .findAll(source)
+            .forEach { match ->
 
                 builder.addStyle(
 
@@ -2727,7 +3035,7 @@ class MarkdownSyntaxVisualTransformation(
 
 
 // =====================================================
-// QUOTED TEXT HELPER
+// FIND END OF QUOTED TEXT
 // =====================================================
 
 fun findQuotedTextEnd(
@@ -2759,10 +3067,7 @@ fun findQuotedTextEnd(
             text[index]
 
 
-        if (
-            escaped
-        ) {
-
+        if (escaped) {
 
             escaped =
                 false
@@ -2775,7 +3080,6 @@ fun findQuotedTextEnd(
                 '\\'
             ) {
 
-
                 escaped =
                     true
 
@@ -2783,7 +3087,6 @@ fun findQuotedTextEnd(
                 current ==
                 quoteCharacter
             ) {
-
 
                 return index + 1
             }
@@ -2885,7 +3188,7 @@ val KOTLIN_KEYWORDS =
 
 
 // =====================================================
-// SEARCH COUNT
+// COUNT SEARCH OCCURRENCES
 // =====================================================
 
 fun countOccurrences(
@@ -2901,7 +3204,6 @@ fun countOccurrences(
         query.isEmpty()
     ) {
 
-
         return 0
     }
 
@@ -2914,9 +3216,7 @@ fun countOccurrences(
         0
 
 
-    while (
-        true
-    ) {
+    while (true) {
 
 
         val index =
@@ -2934,7 +3234,6 @@ fun countOccurrences(
         if (
             index == -1
         ) {
-
 
             break
         }
@@ -2954,7 +3253,7 @@ fun countOccurrences(
 
 
 // =====================================================
-// READ FILE
+// READ TEXT FILE
 // =====================================================
 
 fun readTextFromFile(
@@ -2980,7 +3279,7 @@ fun readTextFromFile(
 
 
 // =====================================================
-// SAVE FILE
+// SAVE TEXT FILE
 // =====================================================
 
 fun saveTextToFile(
@@ -3103,7 +3402,6 @@ fun addRecentFile(
 
 
     recentFiles.removeAll {
-
 
         it.uri ==
                 uri.toString()
@@ -3304,6 +3602,142 @@ fun loadRecentFiles(
 
 
     return recentFiles
+}
+
+
+// =====================================================
+// SAVE CRASH RECOVERY DRAFT
+// =====================================================
+
+fun saveRecoveryDraft(
+
+    context: Context,
+
+    fileName: String,
+
+    text: String
+
+) {
+
+
+    val preferences =
+        context
+            .getSharedPreferences(
+
+                "editor_recovery",
+
+                Context.MODE_PRIVATE
+            )
+
+
+    preferences
+        .edit()
+        .putString(
+            "file_name",
+            fileName
+        )
+        .putString(
+            "recovery_text",
+            text
+        )
+        .putLong(
+            "saved_at",
+            System.currentTimeMillis()
+        )
+        .apply()
+}
+
+
+// =====================================================
+// LOAD CRASH RECOVERY DRAFT
+// =====================================================
+
+fun loadRecoveryDraft(
+
+    context: Context
+
+): RecoveryDraft? {
+
+
+    val preferences =
+        context
+            .getSharedPreferences(
+
+                "editor_recovery",
+
+                Context.MODE_PRIVATE
+            )
+
+
+    val text =
+        preferences
+            .getString(
+
+                "recovery_text",
+
+                null
+            )
+
+            ?: return null
+
+
+    val fileName =
+        preferences
+            .getString(
+
+                "file_name",
+
+                "untitled.txt"
+            )
+
+            ?: "untitled.txt"
+
+
+    val savedAt =
+        preferences
+            .getLong(
+
+                "saved_at",
+
+                0L
+            )
+
+
+    return RecoveryDraft(
+
+        fileName =
+            fileName,
+
+        text =
+            text,
+
+        savedAt =
+            savedAt
+    )
+}
+
+
+// =====================================================
+// CLEAR CRASH RECOVERY DRAFT
+// =====================================================
+
+fun clearRecoveryDraft(
+
+    context: Context
+
+) {
+
+
+    context
+        .getSharedPreferences(
+
+            "editor_recovery",
+
+            Context.MODE_PRIVATE
+        )
+        .edit()
+        .clear()
+        .apply()
 }
 
 
