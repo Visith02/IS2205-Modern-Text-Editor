@@ -66,6 +66,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.github.difflib.DiffUtils
+import com.github.difflib.UnifiedDiffUtils
 import com.is2205.moderntexteditor.database.DocumentDao
 import com.is2205.moderntexteditor.database.DocumentEntity
 import com.is2205.moderntexteditor.database.EditorDatabase
@@ -223,7 +225,7 @@ fun EditorScreen() {
 
 
     // =================================================
-    // VERSION HISTORY - NEW M3.6
+    // VERSION HISTORY
     // =================================================
 
     var showVersionHistoryDialog by remember {
@@ -250,6 +252,33 @@ fun EditorScreen() {
 
     var previewVersionText by remember {
         mutableStateOf("")
+    }
+
+
+    // =================================================
+    // DIFF VIEWER - M3.7
+    // =================================================
+
+    var showDiffDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var isLoadingDiff by remember {
+        mutableStateOf(false)
+    }
+
+    var diffFromLabel by remember {
+        mutableStateOf("")
+    }
+
+    var diffToLabel by remember {
+        mutableStateOf("")
+    }
+
+    var diffLines by remember {
+        mutableStateOf<List<String>>(
+            emptyList()
+        )
     }
 
 
@@ -531,6 +560,12 @@ fun EditorScreen() {
                         currentVersionNumber =
                             0
 
+                        versionHistory =
+                            emptyList()
+
+                        diffLines =
+                            emptyList()
+
                         undoStack.clear()
                         redoStack.clear()
 
@@ -639,6 +674,12 @@ fun EditorScreen() {
 
                     currentVersionNumber =
                         0
+
+                    versionHistory =
+                        emptyList()
+
+                    diffLines =
+                        emptyList()
 
                     addRecentFile(
                         context,
@@ -881,7 +922,7 @@ fun EditorScreen() {
 
 
     // =================================================
-    // OPEN VERSION HISTORY - M3.6
+    // OPEN VERSION HISTORY
     // =================================================
 
     fun openVersionHistory() {
@@ -951,7 +992,7 @@ fun EditorScreen() {
 
 
     // =================================================
-    // PREVIEW HISTORICAL VERSION - M3.6
+    // PREVIEW HISTORICAL VERSION
     // =================================================
 
     fun previewVersion(
@@ -1000,6 +1041,138 @@ fun EditorScreen() {
 
                 statusMessage =
                     "Unable to load version: ${e.message}"
+            }
+        }
+    }
+
+
+    // =================================================
+    // OPEN DIFF VIEWER - M3.7
+    // =================================================
+
+    fun openDiffForVersion(
+        version: VersionEntity
+    ) {
+
+        if (isLoadingDiff) {
+
+            return
+        }
+
+        isLoadingDiff =
+            true
+
+        statusMessage =
+            "Preparing diff for Version ${version.versionNumber}..."
+
+        coroutineScope.launch {
+
+            try {
+
+                val result =
+
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        val newText =
+
+                            versionManager
+                                .reconstructVersion(
+                                    documentKey =
+                                        documentKey,
+                                    targetVersionNumber =
+                                        version.versionNumber
+                                )
+
+
+                        val oldText =
+
+                            if (
+                                version.versionNumber > 1
+                            ) {
+
+                                versionManager
+                                    .reconstructVersion(
+                                        documentKey =
+                                            documentKey,
+                                        targetVersionNumber =
+                                            version.versionNumber - 1
+                                    )
+
+                            } else {
+
+                                ""
+                            }
+
+
+                        val fromLabel =
+
+                            if (
+                                version.versionNumber > 1
+                            ) {
+
+                                "Version ${version.versionNumber - 1}"
+
+                            } else {
+
+                                "Empty document"
+                            }
+
+
+                        val toLabel =
+                            "Version ${version.versionNumber}"
+
+
+                        val lines =
+                            buildUnifiedDiff(
+                                oldText = oldText,
+                                newText = newText,
+                                oldLabel = fromLabel,
+                                newLabel = toLabel
+                            )
+
+
+                        Triple(
+                            fromLabel,
+                            toLabel,
+                            lines
+                        )
+                    }
+
+
+                diffFromLabel =
+                    result.first
+
+                diffToLabel =
+                    result.second
+
+                diffLines =
+                    result.third
+
+                showVersionHistoryDialog =
+                    false
+
+                showVersionPreviewDialog =
+                    false
+
+                showDiffDialog =
+                    true
+
+                statusMessage =
+                    "Diff: $diffFromLabel → $diffToLabel"
+
+            } catch (
+                e: Exception
+            ) {
+
+                statusMessage =
+                    "Unable to create diff: ${e.message}"
+
+            } finally {
+
+                isLoadingDiff =
+                    false
             }
         }
     }
@@ -1062,8 +1235,6 @@ fun EditorScreen() {
 
                 actions = {
 
-                    // SAVE
-
                     TextButton(
 
                         onClick = {
@@ -1078,8 +1249,6 @@ fun EditorScreen() {
                         )
                     }
 
-
-                    // MORE MENU
 
                     Box {
 
@@ -1097,6 +1266,7 @@ fun EditorScreen() {
                                 "More"
                             )
                         }
+
 
                         DropdownMenu(
 
@@ -1144,6 +1314,9 @@ fun EditorScreen() {
                                         0
 
                                     versionHistory =
+                                        emptyList()
+
+                                    diffLines =
                                         emptyList()
 
                                     undoStack.clear()
@@ -1296,8 +1469,7 @@ fun EditorScreen() {
                                             "Read-only mode: Undo disabled"
 
                                     } else if (
-                                        undoStack
-                                            .isNotEmpty()
+                                        undoStack.isNotEmpty()
                                     ) {
 
                                         redoStack.add(
@@ -1347,8 +1519,7 @@ fun EditorScreen() {
                                             "Read-only mode: Redo disabled"
 
                                     } else if (
-                                        redoStack
-                                            .isNotEmpty()
+                                        redoStack.isNotEmpty()
                                     ) {
 
                                         undoStack.add(
@@ -1453,9 +1624,7 @@ fun EditorScreen() {
                             )
 
 
-                            // =================================================
-                            // VERSION HISTORY - NEW M3.6
-                            // =================================================
+                            // VERSION HISTORY
 
                             DropdownMenuItem(
 
@@ -1977,6 +2146,9 @@ fun EditorScreen() {
                             versionHistory =
                                 emptyList()
 
+                            diffLines =
+                                emptyList()
+
                             undoStack.clear()
                             redoStack.clear()
 
@@ -2116,6 +2288,9 @@ fun EditorScreen() {
                                                         0
 
                                                     versionHistory =
+                                                        emptyList()
+
+                                                    diffLines =
                                                         emptyList()
 
                                                     undoStack.clear()
@@ -2368,15 +2543,12 @@ fun EditorScreen() {
 
                     Row {
 
-                        // FIND
-
                         TextButton(
 
                             onClick = {
 
                                 if (
-                                    searchText
-                                        .isBlank()
+                                    searchText.isBlank()
                                 ) {
 
                                     searchResultMessage =
@@ -2411,8 +2583,6 @@ fun EditorScreen() {
                         }
 
 
-                        // REPLACE
-
                         TextButton(
 
                             onClick = {
@@ -2423,8 +2593,7 @@ fun EditorScreen() {
                                         "Read-only mode: Replace disabled"
 
                                 } else if (
-                                    searchText
-                                        .isBlank()
+                                    searchText.isBlank()
                                 ) {
 
                                     searchResultMessage =
@@ -2477,8 +2646,6 @@ fun EditorScreen() {
 
                     Row {
 
-                        // REPLACE ALL
-
                         TextButton(
 
                             onClick = {
@@ -2489,8 +2656,7 @@ fun EditorScreen() {
                                         "Read-only mode: Replace All disabled"
 
                                 } else if (
-                                    searchText
-                                        .isBlank()
+                                    searchText.isBlank()
                                 ) {
 
                                     searchResultMessage =
@@ -2560,7 +2726,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // VERSION HISTORY DIALOG - NEW M3.6
+    // VERSION HISTORY DIALOG
     // =====================================================
 
     if (showVersionHistoryDialog) {
@@ -2633,6 +2799,7 @@ fun EditorScreen() {
                                 )
                         )
 
+
                         LazyColumn(
 
                             modifier =
@@ -2649,6 +2816,7 @@ fun EditorScreen() {
                                 )
 
                         ) {
+
 
                             items(
 
@@ -2830,24 +2998,57 @@ fun EditorScreen() {
 
                                             modifier =
                                                 Modifier.height(
-                                                    6.dp
+                                                    8.dp
                                                 )
                                         )
 
 
-                                        Text(
+                                        Row(
 
-                                            text =
-                                                "Tap to preview",
+                                            modifier =
+                                                Modifier.fillMaxWidth(),
 
-                                            style =
-                                                MaterialTheme
-                                                    .typography
-                                                    .labelSmall,
+                                            horizontalArrangement =
+                                                Arrangement.SpaceBetween,
 
-                                            fontWeight =
-                                                FontWeight.SemiBold
-                                        )
+                                            verticalAlignment =
+                                                Alignment.CenterVertically
+
+                                        ) {
+
+
+                                            Text(
+
+                                                text =
+                                                    "Tap card to preview",
+
+                                                style =
+                                                    MaterialTheme
+                                                        .typography
+                                                        .labelSmall
+                                            )
+
+
+                                            // =================================================
+                                            // NEW M3.7 BUTTON
+                                            // =================================================
+
+                                            TextButton(
+
+                                                onClick = {
+
+                                                    openDiffForVersion(
+                                                        version
+                                                    )
+                                                }
+
+                                            ) {
+
+                                                Text(
+                                                    "View Diff"
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2878,7 +3079,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // HISTORICAL VERSION PREVIEW - NEW M3.6
+    // HISTORICAL VERSION PREVIEW
     // =====================================================
 
     if (showVersionPreviewDialog) {
@@ -3000,6 +3201,572 @@ fun EditorScreen() {
             }
         )
     }
+
+
+    // =====================================================
+    // DIFF VIEWER DIALOG - NEW M3.7
+    // =====================================================
+
+    if (showDiffDialog) {
+
+        val addedLines =
+
+            diffLines.count {
+
+                it.startsWith("+") &&
+                        !it.startsWith("+++")
+            }
+
+
+        val removedLines =
+
+            diffLines.count {
+
+                it.startsWith("-") &&
+                        !it.startsWith("---")
+            }
+
+
+        AlertDialog(
+
+            onDismissRequest = {
+
+                showDiffDialog =
+                    false
+
+                showVersionHistoryDialog =
+                    true
+            },
+
+            title = {
+
+                Column {
+
+                    Text(
+                        "Diff Viewer"
+                    )
+
+                    Text(
+
+                        text =
+                            "$diffFromLabel → $diffToLabel",
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
+                    )
+                }
+            },
+
+            text = {
+
+                Column {
+
+
+                    if (isLoadingDiff) {
+
+                        Text(
+                            "Loading differences..."
+                        )
+
+                    } else {
+
+
+                        Surface(
+
+                            modifier =
+                                Modifier.fillMaxWidth(),
+
+                            shape =
+                                RoundedCornerShape(
+                                    8.dp
+                                ),
+
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .surfaceVariant
+
+                        ) {
+
+                            Column(
+
+                                modifier =
+                                    Modifier.padding(
+                                        10.dp
+                                    )
+
+                            ) {
+
+
+                                Text(
+
+                                    text =
+                                        "Changes",
+
+                                    fontWeight =
+                                        FontWeight.Bold
+                                )
+
+
+                                Spacer(
+
+                                    modifier =
+                                        Modifier.height(
+                                            4.dp
+                                        )
+                                )
+
+
+                                Text(
+
+                                    text =
+                                        "+ $addedLines added    - $removedLines removed",
+
+                                    style =
+                                        MaterialTheme
+                                            .typography
+                                            .bodySmall
+                                )
+                            }
+                        }
+
+
+                        Spacer(
+
+                            modifier =
+                                Modifier.height(
+                                    10.dp
+                                )
+                        )
+
+
+                        Text(
+
+                            text =
+                                "+ Added line",
+
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .primary,
+
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .labelSmall
+                        )
+
+
+                        Text(
+
+                            text =
+                                "- Removed line",
+
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .error,
+
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .labelSmall
+                        )
+
+
+                        Text(
+
+                            text =
+                                "@@ Changed section",
+
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .secondary,
+
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .labelSmall
+                        )
+
+
+                        Spacer(
+
+                            modifier =
+                                Modifier.height(
+                                    8.dp
+                                )
+                        )
+
+
+                        Surface(
+
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(
+                                        min =
+                                            180.dp,
+                                        max =
+                                            450.dp
+                                    ),
+
+                            shape =
+                                RoundedCornerShape(
+                                    8.dp
+                                ),
+
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .surface
+
+                        ) {
+
+
+                            DiffViewerText(
+
+                                lines =
+                                    diffLines,
+
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(
+                                            4.dp
+                                        )
+                            )
+                        }
+                    }
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        showDiffDialog =
+                            false
+
+                        showVersionHistoryDialog =
+                            true
+                    }
+
+                ) {
+
+                    Text(
+                        "Back to History"
+                    )
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        showDiffDialog =
+                            false
+                    }
+
+                ) {
+
+                    Text(
+                        "Close"
+                    )
+                }
+            }
+        )
+    }
+}
+
+
+// =====================================================
+// DIFF VIEWER TEXT - M3.7
+// =====================================================
+
+@Composable
+fun DiffViewerText(
+
+    lines: List<String>,
+
+    modifier: Modifier = Modifier
+
+) {
+
+    val addedColor =
+        MaterialTheme
+            .colorScheme
+            .primary
+
+    val removedColor =
+        MaterialTheme
+            .colorScheme
+            .error
+
+    val metadataColor =
+        MaterialTheme
+            .colorScheme
+            .secondary
+
+    val normalColor =
+        MaterialTheme
+            .colorScheme
+            .onSurface
+
+
+    val builder =
+        AnnotatedString.Builder()
+
+
+    var currentPosition =
+        0
+
+
+    lines.forEachIndexed {
+
+            index,
+            line ->
+
+
+        val color =
+
+            when {
+
+                line.startsWith("+++") -> {
+
+                    metadataColor
+                }
+
+                line.startsWith("---") -> {
+
+                    metadataColor
+                }
+
+                line.startsWith("@@") -> {
+
+                    metadataColor
+                }
+
+                line.startsWith("+") -> {
+
+                    addedColor
+                }
+
+                line.startsWith("-") -> {
+
+                    removedColor
+                }
+
+                else -> {
+
+                    normalColor
+                }
+            }
+
+
+        builder.append(
+            line
+        )
+
+
+        builder.addStyle(
+
+            SpanStyle(
+
+                color =
+                    color,
+
+                fontWeight =
+
+                    if (
+                        line.startsWith("+") ||
+                        line.startsWith("-") ||
+                        line.startsWith("@@")
+                    ) {
+
+                        FontWeight.SemiBold
+
+                    } else {
+
+                        FontWeight.Normal
+                    }
+            ),
+
+            currentPosition,
+
+            currentPosition +
+                    line.length
+        )
+
+
+        currentPosition +=
+            line.length
+
+
+        if (
+            index !=
+            lines.lastIndex
+        ) {
+
+            builder.append(
+                "\n"
+            )
+
+            currentPosition++
+        }
+    }
+
+
+    val verticalScroll =
+        rememberScrollState()
+
+    val horizontalScroll =
+        rememberScrollState()
+
+
+    Text(
+
+        text =
+            builder.toAnnotatedString(),
+
+        modifier =
+            modifier
+                .verticalScroll(
+                    verticalScroll
+                )
+                .horizontalScroll(
+                    horizontalScroll
+                )
+                .padding(
+                    8.dp
+                ),
+
+        fontFamily =
+            FontFamily.Monospace,
+
+        style =
+            MaterialTheme
+                .typography
+                .bodySmall
+    )
+}
+
+
+// =====================================================
+// CREATE UNIFIED DIFF - M3.7
+// =====================================================
+
+fun buildUnifiedDiff(
+
+    oldText: String,
+
+    newText: String,
+
+    oldLabel: String,
+
+    newLabel: String
+
+): List<String> {
+
+
+    val normalizedOld =
+        normalizeTextForDiff(
+            oldText
+        )
+
+
+    val normalizedNew =
+        normalizeTextForDiff(
+            newText
+        )
+
+
+    if (
+        normalizedOld ==
+        normalizedNew
+    ) {
+
+        return listOf(
+            "No differences between these versions."
+        )
+    }
+
+
+    val oldLines =
+
+        if (
+            normalizedOld.isEmpty()
+        ) {
+
+            emptyList()
+
+        } else {
+
+            normalizedOld.split(
+                "\n"
+            )
+        }
+
+
+    val newLines =
+
+        if (
+            normalizedNew.isEmpty()
+        ) {
+
+            emptyList()
+
+        } else {
+
+            normalizedNew.split(
+                "\n"
+            )
+        }
+
+
+    val patch =
+        DiffUtils.diff(
+            oldLines,
+            newLines
+        )
+
+
+    return UnifiedDiffUtils
+        .generateUnifiedDiff(
+            oldLabel,
+            newLabel,
+            oldLines,
+            patch,
+            3
+        )
+}
+
+
+// =====================================================
+// NORMALIZE TEXT FOR DIFF - M3.7
+// =====================================================
+
+fun normalizeTextForDiff(
+    text: String
+): String {
+
+
+    return text
+        .replace(
+            "\r\n",
+            "\n"
+        )
+        .replace(
+            "\r",
+            "\n"
+        )
 }
 
 
@@ -3495,8 +4262,6 @@ class KotlinSyntaxVisualTransformation(
         ) {
 
 
-            // LINE COMMENTS
-
             if (
                 source.startsWith(
                     "//",
@@ -3547,8 +4312,6 @@ class KotlinSyntaxVisualTransformation(
                 continue
             }
 
-
-            // BLOCK COMMENTS
 
             if (
                 source.startsWith(
@@ -3601,8 +4364,6 @@ class KotlinSyntaxVisualTransformation(
             }
 
 
-            // TRIPLE STRINGS
-
             if (
                 source.startsWith(
                     "\"\"\"",
@@ -3652,8 +4413,6 @@ class KotlinSyntaxVisualTransformation(
             }
 
 
-            // NORMAL STRING
-
             if (
                 source[index] == '"'
             ) {
@@ -3687,8 +4446,6 @@ class KotlinSyntaxVisualTransformation(
             }
 
 
-            // CHARACTER
-
             if (
                 source[index] == '\''
             ) {
@@ -3721,8 +4478,6 @@ class KotlinSyntaxVisualTransformation(
                 continue
             }
 
-
-            // ANNOTATION
 
             if (
                 source[index] == '@'
@@ -3776,8 +4531,6 @@ class KotlinSyntaxVisualTransformation(
                 }
             }
 
-
-            // KEYWORDS
 
             if (
                 source[index].isLetter() ||
@@ -3916,8 +4669,6 @@ class MarkdownSyntaxVisualTransformation(
         }
 
 
-        // HEADINGS
-
         apply(
 
             Regex(
@@ -3932,8 +4683,6 @@ class MarkdownSyntaxVisualTransformation(
             )
         )
 
-
-        // QUOTES
 
         apply(
 
@@ -3950,8 +4699,6 @@ class MarkdownSyntaxVisualTransformation(
         )
 
 
-        // UNORDERED LISTS
-
         apply(
 
             Regex(
@@ -3966,8 +4713,6 @@ class MarkdownSyntaxVisualTransformation(
             )
         )
 
-
-        // ORDERED LISTS
 
         apply(
 
@@ -3984,8 +4729,6 @@ class MarkdownSyntaxVisualTransformation(
         )
 
 
-        // LINKS
-
         apply(
 
             Regex(
@@ -4000,8 +4743,6 @@ class MarkdownSyntaxVisualTransformation(
             )
         )
 
-
-        // BOLD
 
         apply(
 
@@ -4018,8 +4759,6 @@ class MarkdownSyntaxVisualTransformation(
         )
 
 
-        // ITALIC
-
         apply(
 
             Regex(
@@ -4034,8 +4773,6 @@ class MarkdownSyntaxVisualTransformation(
             )
         )
 
-
-        // INLINE CODE
 
         apply(
 
@@ -4053,8 +4790,6 @@ class MarkdownSyntaxVisualTransformation(
             )
         )
 
-
-        // CODE BLOCK
 
         apply(
 
