@@ -21,10 +21,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
@@ -39,9 +43,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,28 +66,43 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.github.difflib.DiffUtils
+import com.github.difflib.UnifiedDiffUtils
+import com.is2205.moderntexteditor.database.DocumentDao
+import com.is2205.moderntexteditor.database.DocumentEntity
+import com.is2205.moderntexteditor.database.EditorDatabase
+import com.is2205.moderntexteditor.database.VersionEntity
 import com.is2205.moderntexteditor.ui.theme.ModernTextEditorTheme
+import com.is2205.moderntexteditor.versioning.NoVersionChangesException
+import com.is2205.moderntexteditor.versioning.VersionManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
 
-
-// =====================================================
-// RECENT FILE MODEL
-// =====================================================
 
 data class RecentFile(
     val name: String,
     val uri: String
 )
 
+data class RecoveryDraft(
+    val fileName: String,
+    val text: String,
+    val savedAt: Long
+)
 
-// =====================================================
-// MAIN ACTIVITY
-// =====================================================
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+
         super.onCreate(savedInstanceState)
 
         setContent {
@@ -94,20 +116,41 @@ class MainActivity : ComponentActivity() {
 }
 
 
-// =====================================================
-// MAIN EDITOR SCREEN
-// =====================================================
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreen() {
 
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    val database =
+        remember {
+            EditorDatabase.getDatabase(context)
+        }
+
+    val documentDao =
+        remember {
+            database.documentDao()
+        }
+
+    val versionDao =
+        remember {
+            database.versionDao()
+        }
+
+    val versionManager =
+        remember {
+            VersionManager(
+                context = context,
+                documentDao = documentDao,
+                versionDao = versionDao
+            )
+        }
 
 
-    // -------------------------------------------------
+    // =====================================================
     // BASIC EDITOR STATE
-    // -------------------------------------------------
+    // =====================================================
 
     var fileName by remember {
         mutableStateOf("untitled.txt")
@@ -125,32 +168,153 @@ fun EditorScreen() {
         mutableStateOf<Uri?>(null)
     }
 
+    var documentKey by remember {
+        mutableStateOf(
+            "draft:${UUID.randomUUID()}"
+        )
+    }
 
-    // -------------------------------------------------
-    // MENU STATE
-    // -------------------------------------------------
 
-    var showMoreMenu by remember {
+    // =====================================================
+    // VERSION CONTROL
+    // =====================================================
+
+    var currentVersionNumber by remember {
+        mutableStateOf(0)
+    }
+
+    var isCreatingVersion by remember {
         mutableStateOf(false)
     }
 
 
-    // -------------------------------------------------
-    // RECENT FILE STATE
-    // -------------------------------------------------
+    // =====================================================
+    // VERSION HISTORY
+    // =====================================================
+
+    var showVersionHistoryDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var versionHistory by remember {
+        mutableStateOf<List<VersionEntity>>(emptyList())
+    }
+
+    var isLoadingVersionHistory by remember {
+        mutableStateOf(false)
+    }
+
+    var showVersionPreviewDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var previewVersionNumber by remember {
+        mutableStateOf(0)
+    }
+
+    var previewVersionText by remember {
+        mutableStateOf("")
+    }
+
+
+    // =====================================================
+    // DIFF VIEWER
+    // =====================================================
+
+    var showDiffDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var isLoadingDiff by remember {
+        mutableStateOf(false)
+    }
+
+    var diffFromLabel by remember {
+        mutableStateOf("")
+    }
+
+    var diffToLabel by remember {
+        mutableStateOf("")
+    }
+
+    var diffLines by remember {
+        mutableStateOf<List<String>>(emptyList())
+    }
+
+
+    // =====================================================
+    // ROLLBACK
+    // =====================================================
+
+    var showRollbackDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var rollbackTargetVersion by remember {
+        mutableStateOf<VersionEntity?>(null)
+    }
+
+    var rollbackTargetText by remember {
+        mutableStateOf("")
+    }
+
+    var isPreparingRollback by remember {
+        mutableStateOf(false)
+    }
+
+
+    // =====================================================
+    // READ ONLY
+    // =====================================================
+
+    var isReadOnly by remember {
+        mutableStateOf(false)
+    }
+
+
+    // =====================================================
+    // CRASH RECOVERY
+    // =====================================================
+
+    var isDirty by remember {
+        mutableStateOf(false)
+    }
+
+    var recoveryDraft by remember {
+        mutableStateOf(
+            loadRecoveryDraft(context)
+        )
+    }
+
+    var showRecoveryDialog by remember {
+        mutableStateOf(
+            recoveryDraft != null
+        )
+    }
+
+
+    // =====================================================
+    // MENU
+    // =====================================================
+
+    var showMoreMenu by remember {
+        mutableStateOf(false)
+    }
 
     var showRecentDialog by remember {
         mutableStateOf(false)
     }
 
     var recentFiles by remember {
-        mutableStateOf(loadRecentFiles(context))
+        mutableStateOf(
+            loadRecentFiles(context)
+        )
     }
 
 
-    // -------------------------------------------------
-    // SEARCH / REPLACE STATE
-    // -------------------------------------------------
+    // =====================================================
+    // SEARCH / REPLACE
+    // =====================================================
 
     var showSearchDialog by remember {
         mutableStateOf(false)
@@ -169,73 +333,107 @@ fun EditorScreen() {
     }
 
 
-    // -------------------------------------------------
+    // =====================================================
     // WORD WRAP
-    // -------------------------------------------------
+    // =====================================================
 
     var wordWrapEnabled by remember {
         mutableStateOf(true)
     }
 
 
-    // -------------------------------------------------
+    // =====================================================
     // UNDO / REDO
-    // -------------------------------------------------
+    // =====================================================
 
-    val undoStack = remember {
-        mutableListOf<String>()
-    }
+    val undoStack =
+        remember {
+            mutableListOf<String>()
+        }
 
-    val redoStack = remember {
-        mutableListOf<String>()
-    }
-
-
-    // -------------------------------------------------
-    // FILE TYPE
-    // -------------------------------------------------
-
-    val fileType = getFileType(fileName)
+    val redoStack =
+        remember {
+            mutableListOf<String>()
+        }
 
 
-    // -------------------------------------------------
-    // LINE COUNT
-    // -------------------------------------------------
+    val fileType =
+        getFileType(fileName)
 
     val lineCount =
-
         if (editorText.isEmpty()) {
-
             1
-
         } else {
-
             editorText.count {
                 it == '\n'
             } + 1
         }
 
 
-    // -------------------------------------------------
-    // UPDATE EDITOR
-    // -------------------------------------------------
+    // =====================================================
+    // UPDATE EDITOR TEXT
+    // =====================================================
 
     fun updateEditorText(newText: String) {
+
+        if (isReadOnly) {
+
+            statusMessage =
+                "Read-only mode: editing disabled"
+
+            return
+        }
 
         if (newText != editorText) {
 
             undoStack.add(editorText)
 
             if (undoStack.size > 100) {
-
                 undoStack.removeAt(0)
             }
 
             redoStack.clear()
 
             editorText = newText
+            isDirty = true
 
             statusMessage = "Editing"
+        }
+    }
+
+
+    // =====================================================
+    // CRASH RECOVERY
+    // =====================================================
+
+    val latestText by rememberUpdatedState(editorText)
+    val latestFileName by rememberUpdatedState(fileName)
+    val latestDirty by rememberUpdatedState(isDirty)
+
+    LaunchedEffect(Unit) {
+
+        while (true) {
+
+            delay(10_000)
+
+            if (latestDirty) {
+
+                if (latestText.isNotEmpty()) {
+
+                    saveRecoveryDraft(
+                        context = context,
+                        fileName = latestFileName,
+                        text = latestText
+                    )
+
+                    statusMessage =
+                        "Recovery auto-saved"
+
+                } else {
+
+                    clearRecoveryDraft(context)
+                }
+            }
         }
     }
 
@@ -247,7 +445,7 @@ fun EditorScreen() {
     val openFileLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocument()
-        ) { uri ->
+        ) { uri: Uri? ->
 
             if (uri != null) {
 
@@ -255,18 +453,15 @@ fun EditorScreen() {
 
                     try {
 
-                        context.contentResolver.takePersistableUriPermission(
-
-                            uri,
-
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                        )
+                        context.contentResolver
+                            .takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            )
 
                     } catch (_: Exception) {
-
                     }
-
 
                     val text =
                         readTextFromFile(
@@ -274,33 +469,74 @@ fun EditorScreen() {
                             uri
                         )
 
-
                     if (text != null) {
 
-                        editorText = text
-
-                        undoStack.clear()
-                        redoStack.clear()
-
-                        fileName =
+                        val openedName =
                             getFileName(
                                 context,
                                 uri
                             ) ?: "unknown.txt"
 
-                        currentFileUri = uri
+                        val openedKey =
+                            uri.toString()
 
+                        editorText = text
+                        fileName = openedName
+                        currentFileUri = uri
+                        documentKey = openedKey
+
+                        currentVersionNumber = 0
+
+                        versionHistory =
+                            emptyList()
+
+                        diffLines =
+                            emptyList()
+
+                        rollbackTargetVersion =
+                            null
+
+                        rollbackTargetText =
+                            ""
+
+                        undoStack.clear()
+                        redoStack.clear()
+
+                        isDirty = false
+                        isReadOnly = false
+
+                        clearRecoveryDraft(context)
+
+                        recoveryDraft = null
 
                         addRecentFile(
                             context,
-                            fileName,
+                            openedName,
                             uri
                         )
-
 
                         recentFiles =
                             loadRecentFiles(context)
 
+                        coroutineScope.launch {
+
+                            val document =
+                                getOrCreateDocument(
+                                    documentDao = documentDao,
+                                    documentKey = openedKey,
+                                    fileName = openedName,
+                                    fileUri = uri.toString()
+                                )
+
+                            isReadOnly =
+                                document.isReadOnly
+
+                            currentVersionNumber =
+                                versionDao
+                                    .getLatestVersionNumber(
+                                        openedKey
+                                    )
+                        }
 
                         statusMessage =
                             "File opened successfully"
@@ -321,11 +557,10 @@ fun EditorScreen() {
 
     val saveAsLauncher =
         rememberLauncherForActivityResult(
-
             contract =
-                ActivityResultContracts.CreateDocument("*/*")
-
-        ) { uri ->
+                ActivityResultContracts
+                    .CreateDocument("*/*")
+        ) { uri: Uri? ->
 
             if (uri != null) {
 
@@ -337,27 +572,64 @@ fun EditorScreen() {
                         editorText
                     )
 
-
-                    currentFileUri = uri
-
-
-                    fileName =
+                    val savedName =
                         getFileName(
                             context,
                             uri
                         ) ?: fileName
 
+                    val savedKey =
+                        uri.toString()
+
+                    currentFileUri = uri
+                    fileName = savedName
+                    documentKey = savedKey
+
+                    currentVersionNumber = 0
+
+                    versionHistory =
+                        emptyList()
+
+                    diffLines =
+                        emptyList()
+
+                    rollbackTargetVersion =
+                        null
+
+                    rollbackTargetText =
+                        ""
 
                     addRecentFile(
                         context,
-                        fileName,
+                        savedName,
                         uri
                     )
-
 
                     recentFiles =
                         loadRecentFiles(context)
 
+                    isDirty = false
+
+                    clearRecoveryDraft(context)
+
+                    recoveryDraft = null
+
+                    coroutineScope.launch {
+
+                        saveDocumentMetadata(
+                            documentDao = documentDao,
+                            documentKey = savedKey,
+                            fileName = savedName,
+                            fileUri = uri.toString(),
+                            isReadOnly = isReadOnly
+                        )
+
+                        currentVersionNumber =
+                            versionDao
+                                .getLatestVersionNumber(
+                                    savedKey
+                                )
+                    }
 
                     statusMessage =
                         "File saved successfully"
@@ -372,7 +644,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // SAVE FUNCTION
+    // SAVE CURRENT
     // =====================================================
 
     fun saveCurrentFile() {
@@ -387,17 +659,33 @@ fun EditorScreen() {
                     editorText
                 )
 
-
                 addRecentFile(
                     context,
                     fileName,
                     currentFileUri!!
                 )
 
-
                 recentFiles =
                     loadRecentFiles(context)
 
+                isDirty = false
+
+                clearRecoveryDraft(context)
+
+                recoveryDraft = null
+
+                coroutineScope.launch {
+
+                    saveDocumentMetadata(
+                        documentDao = documentDao,
+                        documentKey = documentKey,
+                        fileName = fileName,
+                        fileUri =
+                            currentFileUri
+                                ?.toString(),
+                        isReadOnly = isReadOnly
+                    )
+                }
 
                 statusMessage =
                     "File saved"
@@ -410,10 +698,453 @@ fun EditorScreen() {
 
         } else {
 
-            saveAsLauncher.launch(
-                fileName
+            saveAsLauncher.launch(fileName)
+        }
+    }
+
+
+    // =====================================================
+    // READ ONLY
+    // =====================================================
+
+    fun toggleReadOnly() {
+
+        val newValue =
+            !isReadOnly
+
+        isReadOnly =
+            newValue
+
+        coroutineScope.launch {
+
+            saveDocumentMetadata(
+                documentDao = documentDao,
+                documentKey = documentKey,
+                fileName = fileName,
+                fileUri =
+                    currentFileUri
+                        ?.toString(),
+                isReadOnly = newValue
             )
         }
+
+        statusMessage =
+            if (newValue) {
+                "Read-only mode ON"
+            } else {
+                "Read-only mode OFF"
+            }
+    }
+
+
+    // =====================================================
+    // CREATE VERSION
+    // =====================================================
+
+    fun createVersion() {
+
+        if (currentFileUri == null) {
+
+            statusMessage =
+                "Save the file before creating a version"
+
+            return
+        }
+
+        if (isCreatingVersion) {
+            return
+        }
+
+        isCreatingVersion = true
+
+        coroutineScope.launch {
+
+            try {
+
+                val result =
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        versionManager.createVersion(
+                            documentKey = documentKey,
+                            fileName = fileName,
+                            fileUri =
+                                currentFileUri
+                                    ?.toString(),
+                            currentText = editorText
+                        )
+                    }
+
+                currentVersionNumber =
+                    result.versionNumber
+
+                statusMessage =
+                    if (result.isBaseVersion) {
+
+                        "Version 1 created - base snapshot"
+
+                    } else {
+
+                        "Version ${result.versionNumber} created - delta ${result.patchSize} bytes"
+                    }
+
+            } catch (_: NoVersionChangesException) {
+
+                statusMessage =
+                    "No changes since the previous version"
+
+            } catch (e: Exception) {
+
+                statusMessage =
+                    "Unable to create version: ${e.message}"
+
+            } finally {
+
+                isCreatingVersion = false
+            }
+        }
+    }
+
+
+    // =====================================================
+    // VERSION HISTORY
+    // =====================================================
+
+    fun openVersionHistory() {
+
+        if (currentFileUri == null) {
+
+            statusMessage =
+                "Save the file before viewing history"
+
+            return
+        }
+
+        isLoadingVersionHistory = true
+
+        coroutineScope.launch {
+
+            try {
+
+                val versions =
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        versionDao
+                            .getVersions(
+                                documentKey
+                            )
+                            .sortedByDescending {
+                                it.versionNumber
+                            }
+                    }
+
+                versionHistory = versions
+                showVersionHistoryDialog = true
+
+                statusMessage =
+                    if (versions.isEmpty()) {
+                        "No versions created yet"
+                    } else {
+                        "${versions.size} version(s) found"
+                    }
+
+            } catch (e: Exception) {
+
+                statusMessage =
+                    "Unable to load version history: ${e.message}"
+
+            } finally {
+
+                isLoadingVersionHistory = false
+            }
+        }
+    }
+
+
+    // =====================================================
+    // PREVIEW VERSION
+    // =====================================================
+
+    fun previewVersion(version: VersionEntity) {
+
+        statusMessage =
+            "Loading Version ${version.versionNumber}..."
+
+        coroutineScope.launch {
+
+            try {
+
+                val historicalText =
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        versionManager
+                            .reconstructVersion(
+                                documentKey = documentKey,
+                                targetVersionNumber =
+                                    version.versionNumber
+                            )
+                    }
+
+                previewVersionNumber =
+                    version.versionNumber
+
+                previewVersionText =
+                    historicalText
+
+                showVersionHistoryDialog =
+                    false
+
+                showVersionPreviewDialog =
+                    true
+
+                statusMessage =
+                    "Viewing Version ${version.versionNumber}"
+
+            } catch (e: Exception) {
+
+                statusMessage =
+                    "Unable to load version: ${e.message}"
+            }
+        }
+    }
+
+
+    // =====================================================
+    // DIFF VIEWER
+    // =====================================================
+
+    fun openDiffForVersion(version: VersionEntity) {
+
+        if (isLoadingDiff) {
+            return
+        }
+
+        isLoadingDiff = true
+
+        statusMessage =
+            "Preparing diff for Version ${version.versionNumber}..."
+
+        coroutineScope.launch {
+
+            try {
+
+                val result =
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        val newText =
+                            versionManager
+                                .reconstructVersion(
+                                    documentKey =
+                                        documentKey,
+                                    targetVersionNumber =
+                                        version.versionNumber
+                                )
+
+                        val oldText =
+                            if (version.versionNumber > 1) {
+
+                                versionManager
+                                    .reconstructVersion(
+                                        documentKey =
+                                            documentKey,
+                                        targetVersionNumber =
+                                            version.versionNumber - 1
+                                    )
+
+                            } else {
+
+                                ""
+                            }
+
+                        val fromLabel =
+                            if (version.versionNumber > 1) {
+                                "Version ${version.versionNumber - 1}"
+                            } else {
+                                "Empty document"
+                            }
+
+                        val toLabel =
+                            "Version ${version.versionNumber}"
+
+                        val lines =
+                            buildUnifiedDiff(
+                                oldText = oldText,
+                                newText = newText,
+                                oldLabel = fromLabel,
+                                newLabel = toLabel
+                            )
+
+                        Triple(
+                            fromLabel,
+                            toLabel,
+                            lines
+                        )
+                    }
+
+                diffFromLabel =
+                    result.first
+
+                diffToLabel =
+                    result.second
+
+                diffLines =
+                    result.third
+
+                showVersionHistoryDialog =
+                    false
+
+                showVersionPreviewDialog =
+                    false
+
+                showDiffDialog =
+                    true
+
+                statusMessage =
+                    "Diff: $diffFromLabel → $diffToLabel"
+
+            } catch (e: Exception) {
+
+                statusMessage =
+                    "Unable to create diff: ${e.message}"
+
+            } finally {
+
+                isLoadingDiff = false
+            }
+        }
+    }
+
+
+    // =====================================================
+    // ROLLBACK
+    // =====================================================
+
+    fun prepareRollback(version: VersionEntity) {
+
+        if (isReadOnly) {
+
+            statusMessage =
+                "Read-only mode: rollback disabled"
+
+            return
+        }
+
+        if (isPreparingRollback) {
+            return
+        }
+
+        isPreparingRollback = true
+
+        statusMessage =
+            "Preparing rollback to Version ${version.versionNumber}..."
+
+        coroutineScope.launch {
+
+            try {
+
+                val historicalText =
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        versionManager
+                            .reconstructVersion(
+                                documentKey =
+                                    documentKey,
+                                targetVersionNumber =
+                                    version.versionNumber
+                            )
+                    }
+
+                rollbackTargetVersion =
+                    version
+
+                rollbackTargetText =
+                    historicalText
+
+                showVersionHistoryDialog =
+                    false
+
+                showVersionPreviewDialog =
+                    false
+
+                showDiffDialog =
+                    false
+
+                showRollbackDialog =
+                    true
+
+                statusMessage =
+                    "Ready to rollback to Version ${version.versionNumber}"
+
+            } catch (e: Exception) {
+
+                statusMessage =
+                    "Unable to prepare rollback: ${e.message}"
+
+            } finally {
+
+                isPreparingRollback =
+                    false
+            }
+        }
+    }
+
+
+    fun confirmRollback() {
+
+        val targetVersion =
+            rollbackTargetVersion
+                ?: return
+
+        if (isReadOnly) {
+
+            showRollbackDialog = false
+
+            statusMessage =
+                "Read-only mode: rollback disabled"
+
+            return
+        }
+
+        if (editorText == rollbackTargetText) {
+
+            showRollbackDialog = false
+            rollbackTargetVersion = null
+            rollbackTargetText = ""
+
+            statusMessage =
+                "Editor already matches Version ${targetVersion.versionNumber}"
+
+            return
+        }
+
+        undoStack.add(editorText)
+
+        if (undoStack.size > 100) {
+            undoStack.removeAt(0)
+        }
+
+        redoStack.clear()
+
+        editorText =
+            rollbackTargetText
+
+        isDirty = true
+
+        showRollbackDialog = false
+        rollbackTargetVersion = null
+        rollbackTargetText = ""
+
+        statusMessage =
+            "Rolled back to Version ${targetVersion.versionNumber} - press Save"
     }
 
 
@@ -435,28 +1166,40 @@ fun EditorScreen() {
                     Column {
 
                         Text(
-                            text = "Modern Text Editor",
+                            text =
+                                "Modern Text Editor",
                             style =
-                                MaterialTheme.typography.titleMedium
+                                MaterialTheme
+                                    .typography
+                                    .titleMedium
                         )
 
                         Text(
-                            text = fileName,
+                            text =
+                                buildString {
+
+                                    append(fileName)
+
+                                    if (isDirty) {
+                                        append(" *")
+                                    }
+
+                                    if (isReadOnly) {
+                                        append(" [Read Only]")
+                                    }
+                                },
                             style =
-                                MaterialTheme.typography.bodySmall
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall
                         )
                     }
                 },
 
                 actions = {
 
-                    // ---------------------------------
-                    // SAVE - PRIMARY ACTION
-                    // ---------------------------------
-
                     TextButton(
                         onClick = {
-
                             saveCurrentFile()
                         }
                     ) {
@@ -465,17 +1208,11 @@ fun EditorScreen() {
                     }
 
 
-                    // ---------------------------------
-                    // MORE MENU
-                    // ---------------------------------
-
                     Box {
 
                         TextButton(
                             onClick = {
-
-                                showMoreMenu =
-                                    true
+                                showMoreMenu = true
                             }
                         ) {
 
@@ -489,40 +1226,46 @@ fun EditorScreen() {
                                 showMoreMenu,
 
                             onDismissRequest = {
-
-                                showMoreMenu =
-                                    false
+                                showMoreMenu = false
                             }
 
                         ) {
 
 
-                            // NEW
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "New File"
-                                    )
+                                    Text("New File")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
                                     editorText = ""
+                                    fileName = "untitled.txt"
+                                    currentFileUri = null
 
-                                    fileName =
-                                        "untitled.txt"
+                                    documentKey =
+                                        "draft:${UUID.randomUUID()}"
 
-                                    currentFileUri =
-                                        null
+                                    currentVersionNumber = 0
+                                    versionHistory = emptyList()
+                                    diffLines = emptyList()
+
+                                    rollbackTargetVersion = null
+                                    rollbackTargetText = ""
 
                                     undoStack.clear()
                                     redoStack.clear()
+
+                                    isReadOnly = false
+                                    isDirty = false
+
+                                    clearRecoveryDraft(context)
+
+                                    recoveryDraft = null
+                                    showRecoveryDialog = false
 
                                     statusMessage =
                                         "New file created"
@@ -530,30 +1273,20 @@ fun EditorScreen() {
                             )
 
 
-                            // OPEN
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "Open File"
-                                    )
+                                    Text("Open File")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
                                     openFileLauncher.launch(
-
                                         arrayOf(
-
                                             "text/plain",
-
                                             "text/markdown",
-
                                             "application/octet-stream"
                                         )
                                     )
@@ -561,48 +1294,33 @@ fun EditorScreen() {
                             )
 
 
-                            // RECENT
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "Recent Files"
-                                    )
+                                    Text("Recent Files")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
                                     recentFiles =
-                                        loadRecentFiles(
-                                            context
-                                        )
+                                        loadRecentFiles(context)
 
-                                    showRecentDialog =
-                                        true
+                                    showRecentDialog = true
                                 }
                             )
 
 
-                            // SAVE AS
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "Save As"
-                                    )
+                                    Text("Save As")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
                                     saveAsLauncher.launch(
                                         fileName
@@ -611,65 +1329,48 @@ fun EditorScreen() {
                             )
 
 
-                            // FIND / REPLACE
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "Find / Replace"
-                                    )
+                                    Text("Find / Replace")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
-                                    searchResultMessage =
-                                        ""
-
-                                    showSearchDialog =
-                                        true
+                                    searchResultMessage = ""
+                                    showSearchDialog = true
                                 }
                             )
 
 
-                            // UNDO
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "Undo"
-                                    )
+                                    Text("Undo")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
+                                    if (isReadOnly) {
 
-                                    if (
-                                        undoStack.isNotEmpty()
-                                    ) {
+                                        statusMessage =
+                                            "Read-only mode: Undo disabled"
 
-                                        redoStack.add(
-                                            editorText
-                                        )
+                                    } else if (undoStack.isNotEmpty()) {
 
+                                        redoStack.add(editorText)
 
                                         editorText =
                                             undoStack.removeAt(
                                                 undoStack.lastIndex
                                             )
 
-
-                                        statusMessage =
-                                            "Undo"
+                                        isDirty = true
+                                        statusMessage = "Undo"
 
                                     } else {
 
@@ -680,40 +1381,32 @@ fun EditorScreen() {
                             )
 
 
-                            // REDO
-
                             DropdownMenuItem(
 
                                 text = {
-
-                                    Text(
-                                        "Redo"
-                                    )
+                                    Text("Redo")
                                 },
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
+                                    showMoreMenu = false
 
+                                    if (isReadOnly) {
 
-                                    if (
-                                        redoStack.isNotEmpty()
-                                    ) {
+                                        statusMessage =
+                                            "Read-only mode: Redo disabled"
 
-                                        undoStack.add(
-                                            editorText
-                                        )
+                                    } else if (redoStack.isNotEmpty()) {
 
+                                        undoStack.add(editorText)
 
                                         editorText =
                                             redoStack.removeAt(
                                                 redoStack.lastIndex
                                             )
 
-
-                                        statusMessage =
-                                            "Redo"
+                                        isDirty = true
+                                        statusMessage = "Redo"
 
                                     } else {
 
@@ -724,22 +1417,14 @@ fun EditorScreen() {
                             )
 
 
-                            // WORD WRAP
-
                             DropdownMenuItem(
 
                                 text = {
 
                                     Text(
-
-                                        if (
-                                            wordWrapEnabled
-                                        ) {
-
+                                        if (wordWrapEnabled) {
                                             "Word Wrap: ON"
-
                                         } else {
-
                                             "Word Wrap: OFF"
                                         }
                                     )
@@ -747,26 +1432,79 @@ fun EditorScreen() {
 
                                 onClick = {
 
-                                    showMoreMenu =
-                                        false
-
+                                    showMoreMenu = false
 
                                     wordWrapEnabled =
                                         !wordWrapEnabled
 
-
                                     statusMessage =
-
-                                        if (
-                                            wordWrapEnabled
-                                        ) {
-
+                                        if (wordWrapEnabled) {
                                             "Word Wrap ON"
-
                                         } else {
-
                                             "Word Wrap OFF"
                                         }
+                                }
+                            )
+
+
+                            DropdownMenuItem(
+
+                                text = {
+
+                                    Text(
+                                        if (isCreatingVersion) {
+                                            "Creating Version..."
+                                        } else {
+                                            "Create Version"
+                                        }
+                                    )
+                                },
+
+                                enabled =
+                                    !isCreatingVersion,
+
+                                onClick = {
+
+                                    showMoreMenu = false
+
+                                    createVersion()
+                                }
+                            )
+
+
+                            DropdownMenuItem(
+
+                                text = {
+                                    Text("Version History")
+                                },
+
+                                onClick = {
+
+                                    showMoreMenu = false
+
+                                    openVersionHistory()
+                                }
+                            )
+
+
+                            DropdownMenuItem(
+
+                                text = {
+
+                                    Text(
+                                        if (isReadOnly) {
+                                            "Read-only Mode: ON"
+                                        } else {
+                                            "Read-only Mode: OFF"
+                                        }
+                                    )
+                                },
+
+                                onClick = {
+
+                                    showMoreMenu = false
+
+                                    toggleReadOnly()
                                 }
                             )
                         }
@@ -789,19 +1527,13 @@ fun EditorScreen() {
         ) {
 
 
-            // =================================================
-            // FILE INFORMATION CARD
-            // =================================================
-
             Surface(
 
                 modifier =
                     Modifier.fillMaxWidth(),
 
                 shape =
-                    RoundedCornerShape(
-                        12.dp
-                    ),
+                    RoundedCornerShape(12.dp),
 
                 color =
                     MaterialTheme
@@ -810,16 +1542,10 @@ fun EditorScreen() {
 
             ) {
 
-
                 Column(
-
                     modifier =
-                        Modifier.padding(
-                            12.dp
-                        )
-
+                        Modifier.padding(12.dp)
                 ) {
-
 
                     OutlinedTextField(
 
@@ -828,14 +1554,22 @@ fun EditorScreen() {
 
                         onValueChange = {
 
-                            fileName = it
+                            if (!isReadOnly) {
+
+                                fileName = it
+
+                            } else {
+
+                                statusMessage =
+                                    "Read-only mode: rename disabled"
+                            }
                         },
 
-                        label = {
+                        readOnly =
+                            isReadOnly,
 
-                            Text(
-                                "File name"
-                            )
+                        label = {
+                            Text("File name")
                         },
 
                         singleLine =
@@ -847,20 +1581,15 @@ fun EditorScreen() {
 
 
                     Spacer(
-
                         modifier =
-                            Modifier.height(
-                                8.dp
-                            )
+                            Modifier.height(8.dp)
                     )
 
 
                     Row(
 
                         horizontalArrangement =
-                            Arrangement.spacedBy(
-                                8.dp
-                            ),
+                            Arrangement.spacedBy(8.dp),
 
                         verticalAlignment =
                             Alignment.CenterVertically
@@ -868,50 +1597,73 @@ fun EditorScreen() {
                     ) {
 
 
-                        FileTypeBadge(
-
-                            fileType =
-                                fileType
-                        )
+                        FileTypeBadge(fileType)
 
 
                         Text(
-
                             text =
-
-                                if (
-                                    currentFileUri == null
-                                ) {
-
+                                if (currentFileUri == null) {
                                     "New file"
-
                                 } else {
-
                                     "Opened file"
                                 },
-
                             style =
                                 MaterialTheme
                                     .typography
                                     .bodySmall
                         )
+
+
+                        Text(
+                            text =
+                                "V$currentVersionNumber",
+                            fontWeight =
+                                FontWeight.Bold,
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .labelSmall
+                        )
+
+
+                        if (isReadOnly) {
+
+                            Text(
+                                text =
+                                    "READ ONLY",
+                                fontWeight =
+                                    FontWeight.Bold,
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .labelSmall
+                            )
+                        }
+
+
+                        if (isDirty) {
+
+                            Text(
+                                text =
+                                    "Unsaved",
+                                fontWeight =
+                                    FontWeight.Bold,
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .labelSmall
+                            )
+                        }
                     }
                 }
             }
 
 
             Spacer(
-
                 modifier =
-                    Modifier.height(
-                        10.dp
-                    )
+                    Modifier.height(10.dp)
             )
 
-
-            // =================================================
-            // EDITOR
-            // =================================================
 
             EditorTextArea(
 
@@ -921,17 +1673,16 @@ fun EditorScreen() {
                 fileName =
                     fileName,
 
-                onTextChange = {
+                onTextChange = { newText ->
 
-                        newText ->
-
-                    updateEditorText(
-                        newText
-                    )
+                    updateEditorText(newText)
                 },
 
                 wordWrapEnabled =
                     wordWrapEnabled,
+
+                isReadOnly =
+                    isReadOnly,
 
                 modifier =
                     Modifier
@@ -941,17 +1692,10 @@ fun EditorScreen() {
 
 
             Spacer(
-
                 modifier =
-                    Modifier.height(
-                        8.dp
-                    )
+                    Modifier.height(8.dp)
             )
 
-
-            // =================================================
-            // BOTTOM STATUS BAR
-            // =================================================
 
             Surface(
 
@@ -959,9 +1703,7 @@ fun EditorScreen() {
                     Modifier.fillMaxWidth(),
 
                 shape =
-                    RoundedCornerShape(
-                        10.dp
-                    ),
+                    RoundedCornerShape(10.dp),
 
                 color =
                     MaterialTheme
@@ -969,7 +1711,6 @@ fun EditorScreen() {
                         .surfaceVariant
 
             ) {
-
 
                 Row(
 
@@ -992,24 +1733,22 @@ fun EditorScreen() {
 
                     Column {
 
-
                         Text(
-
                             text =
                                 statusMessage,
-
                             style =
                                 MaterialTheme
                                     .typography
                                     .bodySmall
                         )
 
-
                         Text(
-
                             text =
-                                fileType,
-
+                                if (isReadOnly) {
+                                    "$fileType | Read Only | V$currentVersionNumber"
+                                } else {
+                                    "$fileType | Editable | V$currentVersionNumber"
+                                },
                             style =
                                 MaterialTheme
                                     .typography
@@ -1019,40 +1758,26 @@ fun EditorScreen() {
 
 
                     Column(
-
                         horizontalAlignment =
                             Alignment.End
-
                     ) {
 
-
                         Text(
-
                             text =
                                 "$lineCount lines | ${editorText.length} chars",
-
                             style =
                                 MaterialTheme
                                     .typography
                                     .bodySmall
                         )
 
-
                         Text(
-
                             text =
-
-                                if (
-                                    wordWrapEnabled
-                                ) {
-
+                                if (wordWrapEnabled) {
                                     "Wrap ON"
-
                                 } else {
-
                                     "Wrap OFF"
                                 },
-
                             style =
                                 MaterialTheme
                                     .typography
@@ -1066,47 +1791,181 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // RECENT FILES DIALOG
+    // RECOVERY DIALOG
     // =====================================================
 
-    if (showRecentDialog) {
-
+    if (
+        showRecoveryDialog &&
+        recoveryDraft != null
+    ) {
 
         AlertDialog(
 
-            onDismissRequest = {
-
-                showRecentDialog =
-                    false
-            },
+            onDismissRequest = {},
 
             title = {
-
-                Text(
-                    "Recent Files"
-                )
+                Text("Recover Unsaved Work?")
             },
 
             text = {
 
                 Column {
 
+                    Text(
+                        "The editor found an auto-saved document."
+                    )
 
-                    if (
-                        recentFiles.isEmpty()
-                    ) {
+                    Spacer(
+                        Modifier.height(12.dp)
+                    )
 
-                        Text(
-                            "No recent files yet."
-                        )
+                    Text(
+                        text =
+                            "File: ${recoveryDraft!!.fileName}",
+                        fontWeight =
+                            FontWeight.Bold
+                    )
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    Text("Preview:")
+
+                    Text(
+                        text =
+                            if (
+                                recoveryDraft!!
+                                    .text
+                                    .length > 200
+                            ) {
+
+                                recoveryDraft!!
+                                    .text
+                                    .take(200) + "..."
+
+                            } else {
+
+                                recoveryDraft!!
+                                    .text
+                            }
+                    )
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        val draft =
+                            recoveryDraft
+
+                        if (draft != null) {
+
+                            editorText =
+                                draft.text
+
+                            fileName =
+                                draft.fileName
+
+                            currentFileUri =
+                                null
+
+                            documentKey =
+                                "draft:${UUID.randomUUID()}"
+
+                            currentVersionNumber =
+                                0
+
+                            versionHistory =
+                                emptyList()
+
+                            diffLines =
+                                emptyList()
+
+                            rollbackTargetVersion =
+                                null
+
+                            rollbackTargetText =
+                                ""
+
+                            undoStack.clear()
+                            redoStack.clear()
+
+                            isReadOnly =
+                                false
+
+                            isDirty =
+                                true
+
+                            statusMessage =
+                                "Recovered unsaved draft"
+                        }
+
+                        showRecoveryDialog =
+                            false
+                    }
+
+                ) {
+
+                    Text("Recover")
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        clearRecoveryDraft(context)
+
+                        recoveryDraft = null
+
+                        showRecoveryDialog = false
+
+                        statusMessage =
+                            "Recovery discarded"
+                    }
+
+                ) {
+
+                    Text("Discard")
+                }
+            }
+        )
+    }
+
+
+    // =====================================================
+    // RECENT FILES
+    // =====================================================
+
+    if (showRecentDialog) {
+
+        AlertDialog(
+
+            onDismissRequest = {
+                showRecentDialog = false
+            },
+
+            title = {
+                Text("Recent Files")
+            },
+
+            text = {
+
+                Column {
+
+                    if (recentFiles.isEmpty()) {
+
+                        Text("No recent files yet.")
 
                     } else {
 
-
-                        recentFiles.forEach {
-
-                                recentFile ->
-
+                        recentFiles.forEach { recentFile ->
 
                             Text(
 
@@ -1120,12 +1979,10 @@ fun EditorScreen() {
 
                                             try {
 
-
                                                 val uri =
                                                     Uri.parse(
                                                         recentFile.uri
                                                     )
-
 
                                                 val text =
                                                     readTextFromFile(
@@ -1133,27 +1990,52 @@ fun EditorScreen() {
                                                         uri
                                                     )
 
+                                                if (text != null) {
 
-                                                if (
-                                                    text != null
-                                                ) {
+                                                    val key =
+                                                        uri.toString()
 
-
-                                                    editorText =
-                                                        text
-
-
-                                                    undoStack.clear()
-                                                    redoStack.clear()
-
+                                                    editorText = text
 
                                                     fileName =
                                                         recentFile.name
 
-
                                                     currentFileUri =
                                                         uri
 
+                                                    documentKey =
+                                                        key
+
+                                                    currentVersionNumber =
+                                                        0
+
+                                                    versionHistory =
+                                                        emptyList()
+
+                                                    diffLines =
+                                                        emptyList()
+
+                                                    rollbackTargetVersion =
+                                                        null
+
+                                                    rollbackTargetText =
+                                                        ""
+
+                                                    undoStack.clear()
+                                                    redoStack.clear()
+
+                                                    isDirty =
+                                                        false
+
+                                                    isReadOnly =
+                                                        false
+
+                                                    clearRecoveryDraft(
+                                                        context
+                                                    )
+
+                                                    recoveryDraft =
+                                                        null
 
                                                     addRecentFile(
                                                         context,
@@ -1161,39 +2043,55 @@ fun EditorScreen() {
                                                         uri
                                                     )
 
-
                                                     recentFiles =
                                                         loadRecentFiles(
                                                             context
                                                         )
 
+                                                    coroutineScope.launch {
+
+                                                        val document =
+                                                            getOrCreateDocument(
+                                                                documentDao =
+                                                                    documentDao,
+                                                                documentKey =
+                                                                    key,
+                                                                fileName =
+                                                                    recentFile.name,
+                                                                fileUri =
+                                                                    uri.toString()
+                                                            )
+
+                                                        isReadOnly =
+                                                            document.isReadOnly
+
+                                                        currentVersionNumber =
+                                                            versionDao
+                                                                .getLatestVersionNumber(
+                                                                    key
+                                                                )
+                                                    }
 
                                                     statusMessage =
                                                         "Recent file opened"
 
                                                 } else {
 
-
                                                     statusMessage =
                                                         "Unable to read file"
                                                 }
 
-                                            } catch (
-                                                e: Exception
-                                            ) {
-
+                                            } catch (e: Exception) {
 
                                                 statusMessage =
                                                     "Recent file is unavailable"
                                             }
 
-
                                             showRecentDialog =
                                                 false
                                         }
                                         .padding(
-                                            vertical =
-                                                12.dp
+                                            vertical = 12.dp
                                         )
                             )
                         }
@@ -1204,18 +2102,12 @@ fun EditorScreen() {
             confirmButton = {
 
                 TextButton(
-
                     onClick = {
-
-                        showRecentDialog =
-                            false
+                        showRecentDialog = false
                     }
-
                 ) {
 
-                    Text(
-                        "Close"
-                    )
+                    Text("Close")
                 }
             }
         )
@@ -1223,50 +2115,36 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // FIND / REPLACE DIALOG
+    // FIND / REPLACE
     // =====================================================
 
     if (showSearchDialog) {
 
-
         Dialog(
 
             onDismissRequest = {
-
-                showSearchDialog =
-                    false
+                showSearchDialog = false
             }
 
         ) {
-
 
             Card(
 
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .padding(
-                            16.dp
-                        )
+                        .padding(16.dp)
 
             ) {
 
-
                 Column(
-
                     modifier =
-                        Modifier.padding(
-                            20.dp
-                        )
-
+                        Modifier.padding(20.dp)
                 ) {
 
-
                     Text(
-
                         text =
                             "Find and Replace",
-
                         style =
                             MaterialTheme
                                 .typography
@@ -1275,15 +2153,9 @@ fun EditorScreen() {
 
 
                     Spacer(
-
-                        modifier =
-                            Modifier.height(
-                                16.dp
-                            )
+                        Modifier.height(16.dp)
                     )
 
-
-                    // FIND
 
                     OutlinedTextField(
 
@@ -1292,18 +2164,12 @@ fun EditorScreen() {
 
                         onValueChange = {
 
-                            searchText =
-                                it
-
-                            searchResultMessage =
-                                ""
+                            searchText = it
+                            searchResultMessage = ""
                         },
 
                         label = {
-
-                            Text(
-                                "Find"
-                            )
+                            Text("Find")
                         },
 
                         singleLine =
@@ -1315,15 +2181,9 @@ fun EditorScreen() {
 
 
                     Spacer(
-
-                        modifier =
-                            Modifier.height(
-                                8.dp
-                            )
+                        Modifier.height(8.dp)
                     )
 
-
-                    // REPLACE
 
                     OutlinedTextField(
 
@@ -1331,16 +2191,14 @@ fun EditorScreen() {
                             replaceText,
 
                         onValueChange = {
-
-                            replaceText =
-                                it
+                            replaceText = it
                         },
 
-                        label = {
+                        readOnly =
+                            isReadOnly,
 
-                            Text(
-                                "Replace with"
-                            )
+                        label = {
+                            Text("Replace with")
                         },
 
                         singleLine =
@@ -1352,61 +2210,32 @@ fun EditorScreen() {
 
 
                     Spacer(
-
-                        modifier =
-                            Modifier.height(
-                                12.dp
-                            )
+                        Modifier.height(12.dp)
                     )
 
 
-                    if (
-                        searchResultMessage
-                            .isNotEmpty()
-                    ) {
+                    if (searchResultMessage.isNotEmpty()) {
 
-
-                        Text(
-                            searchResultMessage
-                        )
-
+                        Text(searchResultMessage)
 
                         Spacer(
-
-                            modifier =
-                                Modifier.height(
-                                    8.dp
-                                )
+                            Modifier.height(8.dp)
                         )
                     }
 
 
-                    // FIND + REPLACE
-
-                    Row(
-
-                        modifier =
-                            Modifier.fillMaxWidth()
-
-                    ) {
-
+                    Row {
 
                         TextButton(
 
                             onClick = {
 
-
-                                if (
-                                    searchText
-                                        .isBlank()
-                                ) {
-
+                                if (searchText.isBlank()) {
 
                                     searchResultMessage =
                                         "Enter text to search"
 
                                 } else {
-
 
                                     val count =
                                         countOccurrences(
@@ -1414,17 +2243,10 @@ fun EditorScreen() {
                                             searchText
                                         )
 
-
                                     searchResultMessage =
-
-                                        if (
-                                            count > 0
-                                        ) {
-
+                                        if (count > 0) {
                                             "$count match(es) found"
-
                                         } else {
-
                                             "Text not found"
                                         }
                                 }
@@ -1432,10 +2254,7 @@ fun EditorScreen() {
 
                         ) {
 
-
-                            Text(
-                                "Find"
-                            )
+                            Text("Find")
                         }
 
 
@@ -1443,31 +2262,25 @@ fun EditorScreen() {
 
                             onClick = {
 
+                                if (isReadOnly) {
 
-                                if (
-                                    searchText
-                                        .isBlank()
-                                ) {
+                                    searchResultMessage =
+                                        "Read-only mode: Replace disabled"
 
+                                } else if (searchText.isBlank()) {
 
                                     searchResultMessage =
                                         "Enter text to search"
 
                                 } else {
 
-
                                     val index =
                                         editorText.indexOf(
                                             searchText,
-                                            ignoreCase =
-                                                true
+                                            ignoreCase = true
                                         )
 
-
-                                    if (
-                                        index >= 0
-                                    ) {
-
+                                    if (index >= 0) {
 
                                         val newText =
                                             editorText.replaceRange(
@@ -1477,17 +2290,14 @@ fun EditorScreen() {
                                                 replaceText
                                             )
 
-
                                         updateEditorText(
                                             newText
                                         )
-
 
                                         searchResultMessage =
                                             "First match replaced"
 
                                     } else {
-
 
                                         searchResultMessage =
                                             "Text not found"
@@ -1497,40 +2307,28 @@ fun EditorScreen() {
 
                         ) {
 
-
-                            Text(
-                                "Replace"
-                            )
+                            Text("Replace")
                         }
                     }
 
 
-                    // REPLACE ALL + CLOSE
-
-                    Row(
-
-                        modifier =
-                            Modifier.fillMaxWidth()
-
-                    ) {
-
+                    Row {
 
                         TextButton(
 
                             onClick = {
 
+                                if (isReadOnly) {
 
-                                if (
-                                    searchText
-                                        .isBlank()
-                                ) {
+                                    searchResultMessage =
+                                        "Read-only mode: Replace All disabled"
 
+                                } else if (searchText.isBlank()) {
 
                                     searchResultMessage =
                                         "Enter text to search"
 
                                 } else {
-
 
                                     val count =
                                         countOccurrences(
@@ -1538,31 +2336,23 @@ fun EditorScreen() {
                                             searchText
                                         )
 
-
-                                    if (
-                                        count > 0
-                                    ) {
-
+                                    if (count > 0) {
 
                                         val newText =
                                             editorText.replace(
                                                 searchText,
                                                 replaceText,
-                                                ignoreCase =
-                                                    true
+                                                ignoreCase = true
                                             )
-
 
                                         updateEditorText(
                                             newText
                                         )
 
-
                                         searchResultMessage =
                                             "$count match(es) replaced"
 
                                     } else {
-
 
                                         searchResultMessage =
                                             "Text not found"
@@ -1572,151 +2362,999 @@ fun EditorScreen() {
 
                         ) {
 
-
-                            Text(
-                                "Replace All"
-                            )
+                            Text("Replace All")
                         }
 
 
                         TextButton(
-
                             onClick = {
-
-                                showSearchDialog =
-                                    false
+                                showSearchDialog = false
                             }
-
                         ) {
 
-
-                            Text(
-                                "Close"
-                            )
+                            Text("Close")
                         }
                     }
                 }
             }
         }
     }
-}
 
 
-// =====================================================
-// FILE TYPE BADGE
-// =====================================================
+    // =====================================================
+    // VERSION HISTORY
+    // =====================================================
 
-@Composable
-fun FileTypeBadge(
-    fileType: String
-) {
+    if (showVersionHistoryDialog) {
+
+        AlertDialog(
+
+            onDismissRequest = {
+                showVersionHistoryDialog = false
+            },
+
+            title = {
+
+                Column {
+
+                    Text("Version History")
+
+                    Text(
+                        text =
+                            fileName,
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
+                    )
+                }
+            },
+
+            text = {
+
+                Column {
+
+                    if (isLoadingVersionHistory) {
+
+                        Text("Loading versions...")
+
+                    } else if (versionHistory.isEmpty()) {
+
+                        Text(
+                            "No versions have been created for this file yet."
+                        )
+
+                    } else {
+
+                        Text(
+                            text =
+                                "${versionHistory.size} version(s)",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall
+                        )
 
 
-    Surface(
+                        Spacer(
+                            modifier =
+                                Modifier.height(10.dp)
+                        )
 
-        shape =
-            RoundedCornerShape(
-                50
-            ),
 
-        color =
-            MaterialTheme
-                .colorScheme
-                .primaryContainer
+                        LazyColumn(
 
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(
+                                        max = 420.dp
+                                    ),
+
+                            verticalArrangement =
+                                Arrangement.spacedBy(
+                                    8.dp
+                                )
+
+                        ) {
+
+                            items(
+                                items =
+                                    versionHistory,
+                                key = {
+                                    it.id
+                                }
+                            ) { version ->
+
+
+                                Card(
+
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                previewVersion(
+                                                    version
+                                                )
+                                            }
+
+                                ) {
+
+                                    Column(
+                                        modifier =
+                                            Modifier.padding(
+                                                14.dp
+                                            )
+                                    ) {
+
+
+                                        Row(
+
+                                            modifier =
+                                                Modifier
+                                                    .fillMaxWidth(),
+
+                                            horizontalArrangement =
+                                                Arrangement
+                                                    .SpaceBetween,
+
+                                            verticalAlignment =
+                                                Alignment
+                                                    .CenterVertically
+
+                                        ) {
+
+
+                                            Text(
+                                                text =
+                                                    "Version ${version.versionNumber}",
+                                                fontWeight =
+                                                    FontWeight.Bold
+                                            )
+
+
+                                            Text(
+                                                text =
+                                                    when {
+
+                                                        version.isBaseVersion ->
+                                                            "BASE"
+
+                                                        version.versionNumber ==
+                                                                currentVersionNumber ->
+                                                            "LATEST"
+
+                                                        else ->
+                                                            "DELTA"
+                                                    },
+                                                style =
+                                                    MaterialTheme
+                                                        .typography
+                                                        .labelSmall,
+                                                fontWeight =
+                                                    FontWeight.Bold
+                                            )
+                                        }
+
+
+                                        Spacer(
+                                            Modifier.height(5.dp)
+                                        )
+
+
+                                        Text(
+                                            text =
+                                                version.description
+                                                    ?: "Version ${version.versionNumber}"
+                                        )
+
+
+                                        Spacer(
+                                            Modifier.height(4.dp)
+                                        )
+
+
+                                        Text(
+                                            text =
+                                                formatVersionDate(
+                                                    version.createdAt
+                                                ),
+                                            style =
+                                                MaterialTheme
+                                                    .typography
+                                                    .bodySmall
+                                        )
+
+
+                                        if (!version.isBaseVersion) {
+
+                                            val patchBytes =
+                                                version
+                                                    .patchData
+                                                    .toByteArray(
+                                                        Charsets.UTF_8
+                                                    )
+                                                    .size
+
+                                            Spacer(
+                                                Modifier.height(4.dp)
+                                            )
+
+                                            Text(
+                                                text =
+                                                    "Delta size: $patchBytes bytes",
+                                                style =
+                                                    MaterialTheme
+                                                        .typography
+                                                        .labelSmall
+                                            )
+                                        }
+
+
+                                        Spacer(
+                                            Modifier.height(8.dp)
+                                        )
+
+
+                                        Row(
+
+                                            modifier =
+                                                Modifier
+                                                    .fillMaxWidth(),
+
+                                            horizontalArrangement =
+                                                Arrangement
+                                                    .SpaceBetween
+
+                                        ) {
+
+
+                                            TextButton(
+                                                onClick = {
+                                                    openDiffForVersion(
+                                                        version
+                                                    )
+                                                }
+                                            ) {
+
+                                                Text("View Diff")
+                                            }
+
+
+                                            TextButton(
+
+                                                onClick = {
+                                                    prepareRollback(
+                                                        version
+                                                    )
+                                                },
+
+                                                enabled =
+                                                    !isReadOnly &&
+                                                            !isPreparingRollback
+
+                                            ) {
+
+                                                Text("Rollback")
+                                            }
+                                        }
+
+
+                                        Text(
+                                            text =
+                                                "Tap card to preview",
+                                            style =
+                                                MaterialTheme
+                                                    .typography
+                                                    .labelSmall
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+                        showVersionHistoryDialog =
+                            false
+                    }
+                ) {
+
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+
+    // =====================================================
+    // VERSION PREVIEW
+    // =====================================================
+
+    if (showVersionPreviewDialog) {
+
+        AlertDialog(
+
+            onDismissRequest = {
+
+                showVersionPreviewDialog = false
+                showVersionHistoryDialog = true
+            },
+
+            title = {
+
+                Column {
+
+                    Text(
+                        "Version $previewVersionNumber"
+                    )
+
+                    Text(
+                        text =
+                            "Read-only historical preview",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
+                    )
+                }
+            },
+
+            text = {
+
+                Surface(
+
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(
+                                max = 450.dp
+                            ),
+
+                    shape =
+                        RoundedCornerShape(8.dp),
+
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .surfaceVariant
+
+                ) {
+
+                    Text(
+                        text =
+                            previewVersionText,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(
+                                    rememberScrollState()
+                                )
+                                .padding(12.dp),
+                        fontFamily =
+                            FontFamily.Monospace
+                    )
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+
+                        showVersionPreviewDialog =
+                            false
+
+                        showVersionHistoryDialog =
+                            true
+                    }
+                ) {
+
+                    Text("Back to History")
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        showVersionPreviewDialog =
+                            false
+                    }
+                ) {
+
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+
+    // =====================================================
+    // DIFF VIEWER
+    // =====================================================
+
+    if (showDiffDialog) {
+
+        val addedLines =
+            diffLines.count {
+                it.startsWith("+") &&
+                        !it.startsWith("+++")
+            }
+
+        val removedLines =
+            diffLines.count {
+                it.startsWith("-") &&
+                        !it.startsWith("---")
+            }
+
+
+        AlertDialog(
+
+            onDismissRequest = {
+
+                showDiffDialog = false
+                showVersionHistoryDialog = true
+            },
+
+            title = {
+
+                Column {
+
+                    Text("Diff Viewer")
+
+                    Text(
+                        text =
+                            "$diffFromLabel → $diffToLabel",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
+                    )
+                }
+            },
+
+            text = {
+
+                Column {
+
+                    Text(
+                        text =
+                            "+ $addedLines added    - $removedLines removed",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
+                    )
+
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+
+                    Surface(
+
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(
+                                    min = 180.dp,
+                                    max = 450.dp
+                                ),
+
+                        shape =
+                            RoundedCornerShape(8.dp)
+
+                    ) {
+
+                        DiffViewerText(
+                            lines =
+                                diffLines,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(4.dp)
+                        )
+                    }
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+
+                        showDiffDialog = false
+                        showVersionHistoryDialog = true
+                    }
+                ) {
+
+                    Text("Back to History")
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        showDiffDialog = false
+                    }
+                ) {
+
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+
+    // =====================================================
+    // ROLLBACK
+    // =====================================================
+
+    if (
+        showRollbackDialog &&
+        rollbackTargetVersion != null
     ) {
 
+        val target =
+            rollbackTargetVersion!!
 
-        Text(
 
-            text =
-                fileType,
+        AlertDialog(
 
-            modifier =
-                Modifier.padding(
-                    horizontal = 10.dp,
-                    vertical = 5.dp
-                ),
+            onDismissRequest = {
 
-            style =
-                MaterialTheme
-                    .typography
-                    .labelMedium
+                showRollbackDialog = false
+                rollbackTargetVersion = null
+                rollbackTargetText = ""
+                showVersionHistoryDialog = true
+            },
+
+            title = {
+
+                Text(
+                    "Rollback to Version ${target.versionNumber}?"
+                )
+            },
+
+            text = {
+
+                Column {
+
+                    Text(
+                        "The editor will restore the content from Version ${target.versionNumber}."
+                    )
+
+
+                    Spacer(
+                        Modifier.height(10.dp)
+                    )
+
+
+                    Text(
+                        text =
+                            "Existing versions will NOT be deleted.",
+                        fontWeight =
+                            FontWeight.Bold
+                    )
+
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+
+                    Text(
+                        "After rollback, the document will be marked Unsaved. Press Save to write the restored content."
+                    )
+
+
+                    Spacer(
+                        Modifier.height(12.dp)
+                    )
+
+
+                    Surface(
+
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(
+                                    max = 180.dp
+                                ),
+
+                        shape =
+                            RoundedCornerShape(8.dp),
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .surfaceVariant
+
+                    ) {
+
+                        Text(
+                            text =
+                                if (
+                                    rollbackTargetText.length > 500
+                                ) {
+
+                                    rollbackTargetText
+                                        .take(500) + "..."
+
+                                } else {
+
+                                    rollbackTargetText
+                                },
+                            modifier =
+                                Modifier
+                                    .verticalScroll(
+                                        rememberScrollState()
+                                    )
+                                    .padding(10.dp),
+                            fontFamily =
+                                FontFamily.Monospace
+                        )
+                    }
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+                        confirmRollback()
+                    }
+                ) {
+
+                    Text("Rollback")
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+
+                        showRollbackDialog = false
+                        rollbackTargetVersion = null
+                        rollbackTargetText = ""
+                        showVersionHistoryDialog = true
+
+                        statusMessage =
+                            "Rollback cancelled"
+                    }
+                ) {
+
+                    Text("Cancel")
+                }
+            }
         )
     }
 }
 
 
 // =====================================================
-// GET FILE TYPE
+// DIFF VIEWER TEXT
 // =====================================================
 
-fun getFileType(
-    fileName: String
-): String {
+@Composable
+fun DiffViewerText(
+    lines: List<String>,
+    modifier: Modifier = Modifier
+) {
+
+    val addedColor =
+        MaterialTheme
+            .colorScheme
+            .primary
+
+    val removedColor =
+        MaterialTheme
+            .colorScheme
+            .error
+
+    val metadataColor =
+        MaterialTheme
+            .colorScheme
+            .secondary
+
+    val normalColor =
+        MaterialTheme
+            .colorScheme
+            .onSurface
 
 
-    return when {
+    val builder =
+        AnnotatedString.Builder()
+
+    var currentPosition = 0
 
 
-        fileName.endsWith(
-            ".kt",
-            ignoreCase = true
-        ) -> {
+    lines.forEachIndexed { index, line ->
 
-            "Kotlin"
-        }
+        val color =
+            when {
 
+                line.startsWith("+++") ->
+                    metadataColor
 
-        fileName.endsWith(
-            ".md",
-            ignoreCase = true
-        ) ||
-                fileName.endsWith(
-                    ".markdown",
-                    ignoreCase = true
-                ) -> {
+                line.startsWith("---") ->
+                    metadataColor
 
-            "Markdown"
-        }
+                line.startsWith("@@") ->
+                    metadataColor
 
+                line.startsWith("+") ->
+                    addedColor
 
-        fileName.endsWith(
-            ".txt",
-            ignoreCase = true
-        ) -> {
+                line.startsWith("-") ->
+                    removedColor
 
-            "Text"
-        }
+                else ->
+                    normalColor
+            }
 
 
-        else -> {
+        builder.append(line)
 
-            "Plain Text"
+
+        builder.addStyle(
+
+            SpanStyle(
+                color = color,
+                fontWeight =
+                    if (
+                        line.startsWith("+") ||
+                        line.startsWith("-") ||
+                        line.startsWith("@@")
+                    ) {
+                        FontWeight.SemiBold
+                    } else {
+                        FontWeight.Normal
+                    }
+            ),
+
+            currentPosition,
+
+            currentPosition +
+                    line.length
+        )
+
+
+        currentPosition +=
+            line.length
+
+
+        if (index != lines.lastIndex) {
+
+            builder.append("\n")
+            currentPosition++
         }
     }
+
+
+    val verticalScroll =
+        rememberScrollState()
+
+    val horizontalScroll =
+        rememberScrollState()
+
+
+    Text(
+
+        text =
+            builder.toAnnotatedString(),
+
+        modifier =
+            modifier
+                .verticalScroll(
+                    verticalScroll
+                )
+                .horizontalScroll(
+                    horizontalScroll
+                )
+                .padding(8.dp),
+
+        fontFamily =
+            FontFamily.Monospace,
+
+        style =
+            MaterialTheme
+                .typography
+                .bodySmall
+    )
 }
 
 
 // =====================================================
-// EDITOR AREA
+// DIFF GENERATOR
+// =====================================================
+
+fun buildUnifiedDiff(
+    oldText: String,
+    newText: String,
+    oldLabel: String,
+    newLabel: String
+): List<String> {
+
+    val normalizedOld =
+        normalizeTextForDiff(oldText)
+
+    val normalizedNew =
+        normalizeTextForDiff(newText)
+
+
+    if (normalizedOld == normalizedNew) {
+
+        return listOf(
+            "No differences between these versions."
+        )
+    }
+
+
+    val oldLines =
+        if (normalizedOld.isEmpty()) {
+            emptyList()
+        } else {
+            normalizedOld.split("\n")
+        }
+
+
+    val newLines =
+        if (normalizedNew.isEmpty()) {
+            emptyList()
+        } else {
+            normalizedNew.split("\n")
+        }
+
+
+    val patch =
+        DiffUtils.diff(
+            oldLines,
+            newLines
+        )
+
+
+    return UnifiedDiffUtils
+        .generateUnifiedDiff(
+            oldLabel,
+            newLabel,
+            oldLines,
+            patch,
+            3
+        )
+}
+
+
+fun normalizeTextForDiff(
+    text: String
+): String {
+
+    return text
+        .replace(
+            "\r\n",
+            "\n"
+        )
+        .replace(
+            "\r",
+            "\n"
+        )
+}
+
+
+// =====================================================
+// DATABASE HELPERS
+// =====================================================
+
+suspend fun getOrCreateDocument(
+    documentDao: DocumentDao,
+    documentKey: String,
+    fileName: String,
+    fileUri: String?
+): DocumentEntity {
+
+    val existing =
+        documentDao.getDocument(
+            documentKey
+        )
+
+    if (existing != null) {
+        return existing
+    }
+
+    val document =
+        DocumentEntity(
+            documentKey =
+                documentKey,
+            fileName =
+                fileName,
+            fileUri =
+                fileUri
+        )
+
+    documentDao.upsertDocument(
+        document
+    )
+
+    return document
+}
+
+
+suspend fun saveDocumentMetadata(
+    documentDao: DocumentDao,
+    documentKey: String,
+    fileName: String,
+    fileUri: String?,
+    isReadOnly: Boolean
+) {
+
+    val existing =
+        documentDao.getDocument(
+            documentKey
+        )
+
+    val now =
+        System.currentTimeMillis()
+
+    val document =
+        DocumentEntity(
+            documentKey =
+                documentKey,
+            fileName =
+                fileName,
+            fileUri =
+                fileUri,
+            baseSnapshotPath =
+                existing?.baseSnapshotPath,
+            isReadOnly =
+                isReadOnly,
+            createdAt =
+                existing?.createdAt
+                    ?: now,
+            updatedAt =
+                now
+        )
+
+    documentDao.upsertDocument(
+        document
+    )
+}
+
+
+fun formatVersionDate(
+    timestamp: Long
+): String {
+
+    return SimpleDateFormat(
+        "yyyy-MM-dd  HH:mm:ss",
+        Locale.getDefault()
+    ).format(
+        Date(timestamp)
+    )
+}
+
+
+// =====================================================
+// EDITOR
 // =====================================================
 
 @Composable
 fun EditorTextArea(
-
     text: String,
-
     fileName: String,
-
     onTextChange: (String) -> Unit,
-
     wordWrapEnabled: Boolean,
-
+    isReadOnly: Boolean,
     modifier: Modifier = Modifier
-
 ) {
-
 
     val horizontalScrollState =
         rememberScrollState()
@@ -1725,159 +3363,117 @@ fun EditorTextArea(
     val longestLineLength =
         remember(text) {
 
-            text
-                .split("\n")
+            text.split("\n")
                 .maxOfOrNull {
-
                     it.length
-
                 } ?: 0
         }
 
 
-    val isKotlinFile =
+    val isKotlin =
         fileName.endsWith(
             ".kt",
-            ignoreCase = true
+            true
         )
 
 
-    val isMarkdownFile =
+    val isMarkdown =
         fileName.endsWith(
             ".md",
-            ignoreCase = true
+            true
         ) ||
                 fileName.endsWith(
                     ".markdown",
-                    ignoreCase = true
+                    true
                 )
 
 
-    val syntaxTransformation: VisualTransformation =
-
-
+    val transformation:
+            VisualTransformation =
         when {
 
-
-            isKotlinFile ->
-
+            isKotlin ->
 
                 KotlinSyntaxVisualTransformation(
-
-                    keywordColor =
-                        MaterialTheme
-                            .colorScheme
-                            .primary,
-
-                    stringColor =
-                        MaterialTheme
-                            .colorScheme
-                            .tertiary,
-
-                    commentColor =
-                        MaterialTheme
-                            .colorScheme
-                            .onSurfaceVariant,
-
-                    annotationColor =
-                        MaterialTheme
-                            .colorScheme
-                            .secondary
+                    MaterialTheme
+                        .colorScheme
+                        .primary,
+                    MaterialTheme
+                        .colorScheme
+                        .tertiary,
+                    MaterialTheme
+                        .colorScheme
+                        .onSurfaceVariant,
+                    MaterialTheme
+                        .colorScheme
+                        .secondary
                 )
 
 
-            isMarkdownFile ->
-
+            isMarkdown ->
 
                 MarkdownSyntaxVisualTransformation(
-
-                    headingColor =
-                        MaterialTheme
-                            .colorScheme
-                            .primary,
-
-                    boldColor =
-                        MaterialTheme
-                            .colorScheme
-                            .secondary,
-
-                    italicColor =
-                        MaterialTheme
-                            .colorScheme
-                            .tertiary,
-
-                    codeColor =
-                        MaterialTheme
-                            .colorScheme
-                            .tertiary,
-
-                    codeBackgroundColor =
-                        MaterialTheme
-                            .colorScheme
-                            .surfaceVariant,
-
-                    linkColor =
-                        MaterialTheme
-                            .colorScheme
-                            .primary,
-
-                    quoteColor =
-                        MaterialTheme
-                            .colorScheme
-                            .onSurfaceVariant,
-
-                    listColor =
-                        MaterialTheme
-                            .colorScheme
-                            .secondary
+                    MaterialTheme
+                        .colorScheme
+                        .primary,
+                    MaterialTheme
+                        .colorScheme
+                        .secondary,
+                    MaterialTheme
+                        .colorScheme
+                        .tertiary,
+                    MaterialTheme
+                        .colorScheme
+                        .tertiary,
+                    MaterialTheme
+                        .colorScheme
+                        .surfaceVariant,
+                    MaterialTheme
+                        .colorScheme
+                        .primary,
+                    MaterialTheme
+                        .colorScheme
+                        .onSurfaceVariant,
+                    MaterialTheme
+                        .colorScheme
+                        .secondary
                 )
 
 
             else ->
-
-
                 VisualTransformation.None
         }
 
 
     BoxWithConstraints(
-
-        modifier =
-            modifier
-
+        modifier
     ) {
 
-
-        val calculatedWidth =
-
+        val calculated =
             (
                     longestLineLength *
                             12 +
                             80
                     ).dp
 
-
         val noWrapWidth =
-
-            if (
-                calculatedWidth >
-                maxWidth
-            ) {
-
-                calculatedWidth
-
+            if (calculated > maxWidth) {
+                calculated
             } else {
-
                 maxWidth
             }
 
+        val textStyle =
+            MaterialTheme
+                .typography
+                .bodyLarge
+                .copy(
+                    fontFamily =
+                        FontFamily.Monospace
+                )
 
-        // WORD WRAP ON
 
-        if (
-            wordWrapEnabled
-        ) {
-
+        if (wordWrapEnabled) {
 
             TextField(
 
@@ -1887,47 +3483,41 @@ fun EditorTextArea(
                 onValueChange =
                     onTextChange,
 
+                readOnly =
+                    isReadOnly,
+
                 placeholder = {
 
                     Text(
-                        "Start typing here..."
+                        if (isReadOnly) {
+                            "Read-only document"
+                        } else {
+                            "Start typing here..."
+                        }
                     )
                 },
 
                 textStyle =
-                    MaterialTheme
-                        .typography
-                        .bodyLarge
-                        .copy(
-
-                            fontFamily =
-                                FontFamily.Monospace
-                        ),
+                    textStyle,
 
                 visualTransformation =
-                    syntaxTransformation,
+                    transformation,
 
                 modifier =
                     Modifier.fillMaxSize()
             )
 
-
         } else {
-
-
-            // WORD WRAP OFF
 
             Box(
 
-                modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .horizontalScroll(
-                            horizontalScrollState
-                        )
+                Modifier
+                    .fillMaxSize()
+                    .horizontalScroll(
+                        horizontalScrollState
+                    )
 
             ) {
-
 
                 TextField(
 
@@ -1937,25 +3527,14 @@ fun EditorTextArea(
                     onValueChange =
                         onTextChange,
 
-                    placeholder = {
-
-                        Text(
-                            "Start typing here..."
-                        )
-                    },
+                    readOnly =
+                        isReadOnly,
 
                     textStyle =
-                        MaterialTheme
-                            .typography
-                            .bodyLarge
-                            .copy(
-
-                                fontFamily =
-                                    FontFamily.Monospace
-                            ),
+                        textStyle,
 
                     visualTransformation =
-                        syntaxTransformation,
+                        transformation,
 
                     modifier =
                         Modifier
@@ -1971,7 +3550,75 @@ fun EditorTextArea(
 
 
 // =====================================================
-// KOTLIN SYNTAX HIGHLIGHTING
+// FILE TYPE
+// =====================================================
+
+@Composable
+fun FileTypeBadge(
+    fileType: String
+) {
+
+    Surface(
+
+        shape =
+            RoundedCornerShape(50),
+
+        color =
+            MaterialTheme
+                .colorScheme
+                .primaryContainer
+
+    ) {
+
+        Text(
+            text =
+                fileType,
+            modifier =
+                Modifier.padding(
+                    horizontal = 10.dp,
+                    vertical = 5.dp
+                )
+        )
+    }
+}
+
+
+fun getFileType(
+    fileName: String
+): String {
+
+    return when {
+
+        fileName.endsWith(
+            ".kt",
+            true
+        ) -> "Kotlin"
+
+
+        fileName.endsWith(
+            ".md",
+            true
+        ) ||
+                fileName.endsWith(
+                    ".markdown",
+                    true
+                ) -> "Markdown"
+
+
+        fileName.endsWith(
+            ".txt",
+            true
+        ) -> "Text"
+
+
+        else ->
+            "Plain Text"
+    }
+}
+
+
+// =====================================================
+// IMPROVED KOTLIN SYNTAX HIGHLIGHTING
 // =====================================================
 
 class KotlinSyntaxVisualTransformation(
@@ -1987,31 +3634,229 @@ class KotlinSyntaxVisualTransformation(
 ) : VisualTransformation {
 
 
+    private val controlColor =
+        Color(0xFF1565C0)
+
+    private val declarationColor =
+        Color(0xFF7B1FA2)
+
+    private val modifierColor =
+        Color(0xFF3949AB)
+
+    private val typeColor =
+        Color(0xFF00838F)
+
+    private val numberColor =
+        Color(0xFFD84315)
+
+    private val functionColor =
+        Color(0xFFEF6C00)
+
+    private val constantColor =
+        Color(0xFFC2185B)
+
+    private val operatorColor =
+        Color(0xFF455A64)
+
+
+    private val controlKeywords =
+        setOf(
+            "if",
+            "else",
+            "when",
+            "for",
+            "while",
+            "do",
+            "break",
+            "continue",
+            "return",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "in",
+            "is",
+            "as"
+        )
+
+
+    private val declarationKeywords =
+        setOf(
+            "fun",
+            "class",
+            "interface",
+            "object",
+            "val",
+            "var",
+            "typealias",
+            "constructor",
+            "init"
+        )
+
+
+    private val modifierKeywords =
+        setOf(
+            "public",
+            "private",
+            "protected",
+            "internal",
+            "open",
+            "final",
+            "abstract",
+            "override",
+            "data",
+            "sealed",
+            "enum",
+            "annotation",
+            "companion",
+            "inner",
+            "const",
+            "lateinit",
+            "inline",
+            "noinline",
+            "crossinline",
+            "reified",
+            "tailrec",
+            "operator",
+            "infix",
+            "suspend",
+            "external",
+            "expect",
+            "actual",
+            "vararg",
+            "out"
+        )
+
+
+    private val constants =
+        setOf(
+            "true",
+            "false",
+            "null"
+        )
+
+
+    private val otherKeywords =
+        setOf(
+            "package",
+            "import",
+            "this",
+            "super",
+            "by",
+            "where",
+            "get",
+            "set",
+            "field",
+            "property",
+            "receiver",
+            "param",
+            "setparam",
+            "delegate",
+            "file",
+            "dynamic",
+            "typeof"
+        )
+
+
+    private val builtInTypes =
+        setOf(
+            "String",
+            "Int",
+            "Long",
+            "Double",
+            "Float",
+            "Boolean",
+            "Char",
+            "Byte",
+            "Short",
+            "UInt",
+            "ULong",
+            "UByte",
+            "UShort",
+            "Unit",
+            "Any",
+            "Nothing",
+            "Array",
+            "IntArray",
+            "LongArray",
+            "DoubleArray",
+            "FloatArray",
+            "BooleanArray",
+            "CharArray",
+            "ByteArray",
+            "ShortArray",
+            "List",
+            "MutableList",
+            "Set",
+            "MutableSet",
+            "Map",
+            "MutableMap",
+            "Collection",
+            "MutableCollection",
+            "Iterable",
+            "Sequence",
+            "Pair",
+            "Triple"
+        )
+
+
+    private val operators =
+        listOf(
+            "===",
+            "!==",
+            "==",
+            "!=",
+            "<=",
+            ">=",
+            "&&",
+            "||",
+            "++",
+            "--",
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "->",
+            "?:",
+            "!!",
+            "..",
+            "::",
+            "=",
+            "+",
+            "-",
+            "*",
+            "/",
+            "%",
+            "<",
+            ">",
+            "!",
+            "?",
+            ":"
+        )
+
+
     override fun filter(
         text: AnnotatedString
     ): TransformedText {
 
-
         val source =
             text.text
-
 
         val builder =
             AnnotatedString.Builder(
                 source
             )
 
-
         var index = 0
 
 
-        while (
-            index <
-            source.length
-        ) {
+        while (index < source.length) {
 
 
-            // SINGLE-LINE COMMENT
+            // =================================================
+            // SINGLE LINE COMMENTS
+            // =================================================
 
             if (
                 source.startsWith(
@@ -2020,53 +3865,40 @@ class KotlinSyntaxVisualTransformation(
                 )
             ) {
 
-
                 val lineEnd =
                     source.indexOf(
                         '\n',
                         index
                     )
 
-
                 val end =
-
-                    if (
-                        lineEnd == -1
-                    ) {
-
+                    if (lineEnd == -1) {
                         source.length
-
                     } else {
-
                         lineEnd
                     }
 
 
                 builder.addStyle(
-
                     SpanStyle(
                         color =
                             commentColor,
-
                         fontStyle =
                             FontStyle.Italic
                     ),
-
                     index,
-
                     end
                 )
 
 
-                index =
-                    end
-
-
+                index = end
                 continue
             }
 
 
-            // BLOCK COMMENT
+            // =================================================
+            // BLOCK COMMENTS
+            // =================================================
 
             if (
                 source.startsWith(
@@ -2075,53 +3907,40 @@ class KotlinSyntaxVisualTransformation(
                 )
             ) {
 
-
                 val closing =
                     source.indexOf(
                         "*/",
                         index + 2
                     )
 
-
                 val end =
-
-                    if (
-                        closing == -1
-                    ) {
-
+                    if (closing == -1) {
                         source.length
-
                     } else {
-
                         closing + 2
                     }
 
 
                 builder.addStyle(
-
                     SpanStyle(
                         color =
                             commentColor,
-
                         fontStyle =
                             FontStyle.Italic
                     ),
-
                     index,
-
                     end
                 )
 
 
-                index =
-                    end
-
-
+                index = end
                 continue
             }
 
 
+            // =================================================
             // TRIPLE QUOTED STRING
+            // =================================================
 
             if (
                 source.startsWith(
@@ -2130,56 +3949,42 @@ class KotlinSyntaxVisualTransformation(
                 )
             ) {
 
-
                 val closing =
                     source.indexOf(
                         "\"\"\"",
                         index + 3
                     )
 
-
                 val end =
-
-                    if (
-                        closing == -1
-                    ) {
-
+                    if (closing == -1) {
                         source.length
-
                     } else {
-
                         closing + 3
                     }
 
 
                 builder.addStyle(
-
                     SpanStyle(
                         color =
-                            stringColor
+                            stringColor,
+                        fontWeight =
+                            FontWeight.Medium
                     ),
-
                     index,
-
                     end
                 )
 
 
-                index =
-                    end
-
-
+                index = end
                 continue
             }
 
 
-            // NORMAL STRING
+            // =================================================
+            // STRING
+            // =================================================
 
-            if (
-                source[index] ==
-                '"'
-            ) {
-
+            if (source[index] == '"') {
 
                 val end =
                     findQuotedTextEnd(
@@ -2190,33 +3995,27 @@ class KotlinSyntaxVisualTransformation(
 
 
                 builder.addStyle(
-
                     SpanStyle(
                         color =
-                            stringColor
+                            stringColor,
+                        fontWeight =
+                            FontWeight.Medium
                     ),
-
                     index,
-
                     end
                 )
 
 
-                index =
-                    end
-
-
+                index = end
                 continue
             }
 
 
+            // =================================================
             // CHARACTER
+            // =================================================
 
-            if (
-                source[index] ==
-                '\''
-            ) {
-
+            if (source[index] == '\'') {
 
                 val end =
                     findQuotedTextEnd(
@@ -2227,111 +4026,125 @@ class KotlinSyntaxVisualTransformation(
 
 
                 builder.addStyle(
-
                     SpanStyle(
                         color =
-                            stringColor
+                            stringColor,
+                        fontWeight =
+                            FontWeight.Medium
                     ),
-
                     index,
-
                     end
                 )
 
 
-                index =
-                    end
-
-
+                index = end
                 continue
             }
 
 
-            // ANNOTATION
+            // =================================================
+            // ANNOTATIONS
+            // =================================================
 
-            if (
-                source[index] ==
-                '@'
-            ) {
-
+            if (source[index] == '@') {
 
                 var end =
                     index + 1
 
 
                 while (
-                    end <
-                    source.length &&
+                    end < source.length &&
                     (
-                            source[end]
-                                .isLetterOrDigit() ||
-                                    source[end] ==
-                                    '_'
+                            source[end].isLetterOrDigit() ||
+                                    source[end] == '_' ||
+                                    source[end] == '.'
                             )
                 ) {
-
 
                     end++
                 }
 
 
-                if (
-                    end >
-                    index + 1
-                ) {
-
+                if (end > index + 1) {
 
                     builder.addStyle(
-
                         SpanStyle(
                             color =
                                 annotationColor,
-
                             fontWeight =
-                                FontWeight
-                                    .SemiBold
+                                FontWeight.Bold
                         ),
-
                         index,
-
                         end
                     )
 
 
-                    index =
-                        end
-
-
+                    index = end
                     continue
                 }
             }
 
 
-            // KEYWORDS
+            // =================================================
+            // NUMBERS
+            // =================================================
 
-            if (
-                source[index]
-                    .isLetter() ||
-                source[index] ==
-                '_'
-            ) {
-
+            if (source[index].isDigit()) {
 
                 var end =
                     index + 1
 
 
                 while (
-                    end <
-                    source.length &&
+                    end < source.length &&
                     (
-                            source[end]
-                                .isLetterOrDigit() ||
-                                    source[end] ==
-                                    '_'
+                            source[end].isLetterOrDigit() ||
+                                    source[end] == '.' ||
+                                    source[end] == '_'
                             )
                 ) {
 
+                    end++
+                }
+
+
+                builder.addStyle(
+                    SpanStyle(
+                        color =
+                            numberColor,
+                        fontWeight =
+                            FontWeight.SemiBold
+                    ),
+                    index,
+                    end
+                )
+
+
+                index = end
+                continue
+            }
+
+
+            // =================================================
+            // IDENTIFIERS
+            // =================================================
+
+            if (
+                source[index].isLetter() ||
+                source[index] == '_'
+            ) {
+
+                var end =
+                    index + 1
+
+
+                while (
+                    end < source.length &&
+                    (
+                            source[end].isLetterOrDigit() ||
+                                    source[end] == '_'
+                            )
+                ) {
 
                     end++
                 }
@@ -2344,33 +4157,208 @@ class KotlinSyntaxVisualTransformation(
                     )
 
 
-                if (
-                    word in
-                    KOTLIN_KEYWORDS
-                ) {
+                // CONTROL FLOW
 
+                if (word in controlKeywords) {
 
                     builder.addStyle(
-
                         SpanStyle(
                             color =
-                                keywordColor,
-
+                                controlColor,
                             fontWeight =
                                 FontWeight.Bold
                         ),
-
                         index,
+                        end
+                    )
 
+                    index = end
+                    continue
+                }
+
+
+                // DECLARATIONS
+
+                if (word in declarationKeywords) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                declarationColor,
+                            fontWeight =
+                                FontWeight.Bold
+                        ),
+                        index,
+                        end
+                    )
+
+                    index = end
+                    continue
+                }
+
+
+                // MODIFIERS
+
+                if (word in modifierKeywords) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                modifierColor,
+                            fontWeight =
+                                FontWeight.SemiBold
+                        ),
+                        index,
+                        end
+                    )
+
+                    index = end
+                    continue
+                }
+
+
+                // CONSTANTS
+
+                if (word in constants) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                constantColor,
+                            fontWeight =
+                                FontWeight.Bold
+                        ),
+                        index,
+                        end
+                    )
+
+                    index = end
+                    continue
+                }
+
+
+                // BUILT-IN TYPES
+
+                if (word in builtInTypes) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                typeColor,
+                            fontWeight =
+                                FontWeight.Bold
+                        ),
+                        index,
+                        end
+                    )
+
+                    index = end
+                    continue
+                }
+
+
+                // OTHER KEYWORDS
+
+                if (word in otherKeywords) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                keywordColor,
+                            fontWeight =
+                                FontWeight.SemiBold
+                        ),
+                        index,
+                        end
+                    )
+
+                    index = end
+                    continue
+                }
+
+
+                // =================================================
+                // FUNCTION / CONSTRUCTOR CALLS
+                // =================================================
+
+                var lookAhead =
+                    end
+
+
+                while (
+                    lookAhead < source.length &&
+                    source[lookAhead].isWhitespace()
+                ) {
+
+                    lookAhead++
+                }
+
+
+                if (
+                    lookAhead < source.length &&
+                    source[lookAhead] == '('
+                ) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                functionColor,
+                            fontWeight =
+                                FontWeight.SemiBold
+                        ),
+                        index,
                         end
                     )
                 }
 
 
-                index =
-                    end
+                index = end
+                continue
+            }
 
 
+            // =================================================
+            // OPERATORS
+            // =================================================
+
+            var operatorFound =
+                false
+
+
+            for (operator in operators) {
+
+                if (
+                    source.startsWith(
+                        operator,
+                        index
+                    )
+                ) {
+
+                    builder.addStyle(
+                        SpanStyle(
+                            color =
+                                operatorColor,
+                            fontWeight =
+                                FontWeight.Bold
+                        ),
+                        index,
+                        index +
+                                operator.length
+                    )
+
+
+                    index +=
+                        operator.length
+
+                    operatorFound =
+                        true
+
+                    break
+                }
+            }
+
+
+            if (operatorFound) {
                 continue
             }
 
@@ -2380,10 +4368,7 @@ class KotlinSyntaxVisualTransformation(
 
 
         return TransformedText(
-
-            builder
-                .toAnnotatedString(),
-
+            builder.toAnnotatedString(),
             OffsetMapping.Identity
         )
     }
@@ -2391,25 +4376,18 @@ class KotlinSyntaxVisualTransformation(
 
 
 // =====================================================
-// MARKDOWN SYNTAX HIGHLIGHTING
+// MARKDOWN HIGHLIGHTING
 // =====================================================
 
 class MarkdownSyntaxVisualTransformation(
 
     private val headingColor: Color,
-
     private val boldColor: Color,
-
     private val italicColor: Color,
-
     private val codeColor: Color,
-
     private val codeBackgroundColor: Color,
-
     private val linkColor: Color,
-
     private val quoteColor: Color,
-
     private val listColor: Color
 
 ) : VisualTransformation {
@@ -2419,10 +4397,8 @@ class MarkdownSyntaxVisualTransformation(
         text: AnnotatedString
     ): TransformedText {
 
-
         val source =
             text.text
-
 
         val builder =
             AnnotatedString.Builder(
@@ -2430,296 +4406,147 @@ class MarkdownSyntaxVisualTransformation(
             )
 
 
-        // HEADINGS
+        fun apply(
+            regex: Regex,
+            style: SpanStyle
+        ) {
 
-        Regex(
-            """(?m)^(#{1,6})[ \t]+.*$"""
-        )
-            .findAll(
-                source
+            regex
+                .findAll(source)
+                .forEach {
+
+                    builder.addStyle(
+                        style,
+                        it.range.first,
+                        it.range.last + 1
+                    )
+                }
+        }
+
+
+        apply(
+            Regex(
+                """(?m)^(#{1,6})[ \t]+.*$"""
+            ),
+            SpanStyle(
+                color =
+                    headingColor,
+                fontWeight =
+                    FontWeight.Bold
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            headingColor,
-
-                        fontWeight =
-                            FontWeight.Bold
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // BLOCK QUOTES
-
-        Regex(
-            """(?m)^[ \t]*>[ \t]?.*$"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """(?m)^[ \t]*>[ \t]?.*$"""
+            ),
+            SpanStyle(
+                color =
+                    quoteColor,
+                fontStyle =
+                    FontStyle.Italic
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            quoteColor,
-
-                        fontStyle =
-                            FontStyle.Italic
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // UNORDERED LISTS
-
-        Regex(
-            """(?m)^[ \t]*[-+*][ \t]+"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """(?m)^[ \t]*[-+*][ \t]+"""
+            ),
+            SpanStyle(
+                color =
+                    listColor,
+                fontWeight =
+                    FontWeight.Bold
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            listColor,
-
-                        fontWeight =
-                            FontWeight.Bold
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // ORDERED LISTS
-
-        Regex(
-            """(?m)^[ \t]*\d+\.[ \t]+"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """(?m)^[ \t]*\d+\.[ \t]+"""
+            ),
+            SpanStyle(
+                color =
+                    listColor,
+                fontWeight =
+                    FontWeight.Bold
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            listColor,
-
-                        fontWeight =
-                            FontWeight.Bold
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // LINKS
-
-        Regex(
-            """\[[^\]\n]+\]\([^\)\n]+\)"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """\[[^\]\n]+\]\([^\)\n]+\)"""
+            ),
+            SpanStyle(
+                color =
+                    linkColor,
+                textDecoration =
+                    TextDecoration.Underline
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            linkColor,
-
-                        textDecoration =
-                            TextDecoration.Underline
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // BOLD
-
-        Regex(
-            """\*\*[^*\n]+\*\*|__[^_\n]+__"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """\*\*[^*\n]+\*\*|__[^_\n]+__"""
+            ),
+            SpanStyle(
+                color =
+                    boldColor,
+                fontWeight =
+                    FontWeight.Bold
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            boldColor,
-
-                        fontWeight =
-                            FontWeight.Bold
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // ITALIC
-
-        Regex(
-            """(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_)"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_)"""
+            ),
+            SpanStyle(
+                color =
+                    italicColor,
+                fontStyle =
+                    FontStyle.Italic
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            italicColor,
-
-                        fontStyle =
-                            FontStyle.Italic
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // INLINE CODE
-
-        Regex(
-            """`[^`\n]+`"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """`[^`\n]+`"""
+            ),
+            SpanStyle(
+                color =
+                    codeColor,
+                background =
+                    codeBackgroundColor,
+                fontFamily =
+                    FontFamily.Monospace
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            codeColor,
-
-                        background =
-                            codeBackgroundColor,
-
-                        fontFamily =
-                            FontFamily.Monospace
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
-
-
-        // CODE BLOCK
-
-        Regex(
-            """```[\s\S]*?```"""
         )
-            .findAll(
-                source
+
+
+        apply(
+            Regex(
+                """```[\s\S]*?```"""
+            ),
+            SpanStyle(
+                color =
+                    codeColor,
+                background =
+                    codeBackgroundColor,
+                fontFamily =
+                    FontFamily.Monospace
             )
-            .forEach {
-
-                    match ->
-
-
-                builder.addStyle(
-
-                    SpanStyle(
-                        color =
-                            codeColor,
-
-                        background =
-                            codeBackgroundColor,
-
-                        fontFamily =
-                            FontFamily.Monospace
-                    ),
-
-                    match.range.first,
-
-                    match.range.last +
-                            1
-                )
-            }
+        )
 
 
         return TransformedText(
-
-            builder
-                .toAnnotatedString(),
-
+            builder.toAnnotatedString(),
             OffsetMapping.Identity
         )
     }
@@ -2727,66 +4554,39 @@ class MarkdownSyntaxVisualTransformation(
 
 
 // =====================================================
-// QUOTED TEXT HELPER
+// QUOTE HELPER
 // =====================================================
 
 fun findQuotedTextEnd(
-
     text: String,
-
     startIndex: Int,
-
-    quoteCharacter: Char
-
+    quote: Char
 ): Int {
-
 
     var index =
         startIndex + 1
-
 
     var escaped =
         false
 
 
-    while (
-        index <
-        text.length
-    ) {
+    while (index < text.length) {
 
-
-        val current =
+        val character =
             text[index]
 
 
-        if (
-            escaped
-        ) {
+        if (escaped) {
 
+            escaped = false
 
-            escaped =
-                false
+        } else if (character == '\\') {
 
-        } else {
+            escaped = true
 
+        } else if (character == quote) {
 
-            if (
-                current ==
-                '\\'
-            ) {
-
-
-                escaped =
-                    true
-
-            } else if (
-                current ==
-                quoteCharacter
-            ) {
-
-
-                return index + 1
-            }
+            return index + 1
         }
 
 
@@ -2799,151 +4599,40 @@ fun findQuotedTextEnd(
 
 
 // =====================================================
-// KOTLIN KEYWORDS
-// =====================================================
-
-val KOTLIN_KEYWORDS =
-    setOf(
-
-        "as",
-        "break",
-        "class",
-        "continue",
-        "do",
-        "else",
-        "false",
-        "for",
-        "fun",
-        "if",
-        "in",
-        "interface",
-        "is",
-        "null",
-        "object",
-        "package",
-        "return",
-        "super",
-        "this",
-        "throw",
-        "true",
-        "try",
-        "typealias",
-        "typeof",
-        "val",
-        "var",
-        "when",
-        "while",
-
-        "actual",
-        "abstract",
-        "annotation",
-        "companion",
-        "const",
-        "crossinline",
-        "data",
-        "enum",
-        "expect",
-        "external",
-        "final",
-        "infix",
-        "inline",
-        "inner",
-        "internal",
-        "lateinit",
-        "noinline",
-        "open",
-        "operator",
-        "out",
-        "override",
-        "private",
-        "protected",
-        "public",
-        "reified",
-        "sealed",
-        "suspend",
-        "tailrec",
-        "vararg",
-
-        "by",
-        "catch",
-        "constructor",
-        "delegate",
-        "dynamic",
-        "field",
-        "file",
-        "finally",
-        "get",
-        "import",
-        "init",
-        "param",
-        "property",
-        "receiver",
-        "set",
-        "setparam",
-        "where"
-    )
-
-
-// =====================================================
-// SEARCH COUNT
+// SEARCH
 // =====================================================
 
 fun countOccurrences(
-
     text: String,
-
     query: String
-
 ): Int {
 
-
-    if (
-        query.isEmpty()
-    ) {
-
-
+    if (query.isEmpty()) {
         return 0
     }
 
-
-    var count =
-        0
-
-
-    var startIndex =
-        0
+    var count = 0
+    var start = 0
 
 
-    while (
-        true
-    ) {
-
+    while (true) {
 
         val index =
             text.indexOf(
-
                 query,
-
-                startIndex,
-
-                ignoreCase =
-                    true
+                start,
+                ignoreCase = true
             )
 
 
-        if (
-            index == -1
-        ) {
-
-
+        if (index == -1) {
             break
         }
 
 
         count++
 
-
-        startIndex =
+        start =
             index +
                     query.length
     }
@@ -2954,45 +4643,29 @@ fun countOccurrences(
 
 
 // =====================================================
-// READ FILE
+// FILE FUNCTIONS
 // =====================================================
 
 fun readTextFromFile(
-
     context: Context,
-
     uri: Uri
-
 ): String? {
-
 
     return context
         .contentResolver
-        .openInputStream(
-            uri
-        )
+        .openInputStream(uri)
         ?.bufferedReader()
         ?.use {
-
             it.readText()
         }
 }
 
 
-// =====================================================
-// SAVE FILE
-// =====================================================
-
 fun saveTextToFile(
-
     context: Context,
-
     uri: Uri,
-
     text: String
-
 ) {
-
 
     context
         .contentResolver
@@ -3003,77 +4676,46 @@ fun saveTextToFile(
         ?.bufferedWriter()
         ?.use {
 
-                writer ->
-
-
-            writer.write(
-                text
-            )
+            it.write(text)
         }
 }
 
 
-// =====================================================
-// GET FILE NAME
-// =====================================================
-
 fun getFileName(
-
     context: Context,
-
     uri: Uri
-
 ): String? {
-
 
     var name: String? =
         null
 
 
-    val cursor =
-        context
-            .contentResolver
-            .query(
+    context
+        .contentResolver
+        .query(
+            uri,
+            null,
+            null,
+            null,
+            null
+        )
+        ?.use {
 
-                uri,
+            if (it.moveToFirst()) {
 
-                null,
-
-                null,
-
-                null,
-
-                null
-            )
-
-
-    cursor?.use {
-
-
-        if (
-            it.moveToFirst()
-        ) {
-
-
-            val nameIndex =
-                it.getColumnIndex(
-                    OpenableColumns
-                        .DISPLAY_NAME
-                )
-
-
-            if (
-                nameIndex >= 0
-            ) {
-
-
-                name =
-                    it.getString(
-                        nameIndex
+                val index =
+                    it.getColumnIndex(
+                        OpenableColumns.DISPLAY_NAME
                     )
+
+
+                if (index >= 0) {
+
+                    name =
+                        it.getString(index)
+                }
             }
         }
-    }
 
 
     return name
@@ -3081,229 +4723,214 @@ fun getFileName(
 
 
 // =====================================================
-// ADD RECENT FILE
+// RECENT FILES
 // =====================================================
 
 fun addRecentFile(
-
     context: Context,
-
     fileName: String,
-
     uri: Uri
-
 ) {
 
-
-    val recentFiles =
-        loadRecentFiles(
-            context
-        )
+    val files =
+        loadRecentFiles(context)
             .toMutableList()
 
 
-    recentFiles.removeAll {
-
-
+    files.removeAll {
         it.uri ==
                 uri.toString()
     }
 
 
-    recentFiles.add(
-
+    files.add(
         0,
-
         RecentFile(
-
-            name =
-                fileName,
-
-            uri =
-                uri.toString()
+            fileName,
+            uri.toString()
         )
     )
 
 
-    val limitedList =
-        recentFiles.take(
-            10
-        )
-
-
     saveRecentFiles(
-
         context,
-
-        limitedList
+        files.take(10)
     )
 }
 
 
-// =====================================================
-// SAVE RECENT FILES
-// =====================================================
-
 fun saveRecentFiles(
-
     context: Context,
-
     files: List<RecentFile>
-
 ) {
 
-
-    val preferences =
-        context
-            .getSharedPreferences(
-
-                "editor_preferences",
-
-                Context.MODE_PRIVATE
-            )
-
-
-    val jsonArray =
+    val array =
         JSONArray()
 
 
     files.forEach {
 
-            file ->
-
-
-        val jsonObject =
+        array.put(
             JSONObject()
-
-
-        jsonObject.put(
-
-            "name",
-
-            file.name
-        )
-
-
-        jsonObject.put(
-
-            "uri",
-
-            file.uri
-        )
-
-
-        jsonArray.put(
-            jsonObject
+                .put(
+                    "name",
+                    it.name
+                )
+                .put(
+                    "uri",
+                    it.uri
+                )
         )
     }
 
 
-    preferences
+    context
+        .getSharedPreferences(
+            "editor_preferences",
+            Context.MODE_PRIVATE
+        )
         .edit()
         .putString(
-
             "recent_files",
-
-            jsonArray
-                .toString()
+            array.toString()
         )
         .apply()
 }
 
 
-// =====================================================
-// LOAD RECENT FILES
-// =====================================================
-
 fun loadRecentFiles(
-
     context: Context
-
 ): List<RecentFile> {
 
+    val value =
+        context
+            .getSharedPreferences(
+                "editor_preferences",
+                Context.MODE_PRIVATE
+            )
+            .getString(
+                "recent_files",
+                null
+            )
+            ?: return emptyList()
+
+
+    return try {
+
+        val array =
+            JSONArray(value)
+
+
+        buildList {
+
+            for (
+            i in
+            0 until array.length()
+            ) {
+
+                val item =
+                    array.getJSONObject(i)
+
+
+                add(
+                    RecentFile(
+                        item.getString(
+                            "name"
+                        ),
+                        item.getString(
+                            "uri"
+                        )
+                    )
+                )
+            }
+        }
+
+    } catch (_: Exception) {
+
+        emptyList()
+    }
+}
+
+
+// =====================================================
+// RECOVERY
+// =====================================================
+
+fun saveRecoveryDraft(
+    context: Context,
+    fileName: String,
+    text: String
+) {
+
+    context
+        .getSharedPreferences(
+            "editor_recovery",
+            Context.MODE_PRIVATE
+        )
+        .edit()
+        .putString(
+            "file_name",
+            fileName
+        )
+        .putString(
+            "recovery_text",
+            text
+        )
+        .putLong(
+            "saved_at",
+            System.currentTimeMillis()
+        )
+        .apply()
+}
+
+
+fun loadRecoveryDraft(
+    context: Context
+): RecoveryDraft? {
 
     val preferences =
         context
             .getSharedPreferences(
-
-                "editor_preferences",
-
+                "editor_recovery",
                 Context.MODE_PRIVATE
             )
 
 
-    val json =
-        preferences
-            .getString(
-
-                "recent_files",
-
-                null
-            )
-
-            ?: return emptyList()
+    val text =
+        preferences.getString(
+            "recovery_text",
+            null
+        )
+            ?: return null
 
 
-    val recentFiles =
-        mutableListOf<RecentFile>()
+    return RecoveryDraft(
+        preferences.getString(
+            "file_name",
+            "untitled.txt"
+        )
+            ?: "untitled.txt",
+        text,
+        preferences.getLong(
+            "saved_at",
+            0L
+        )
+    )
+}
 
 
-    try {
+fun clearRecoveryDraft(
+    context: Context
+) {
 
-
-        val jsonArray =
-            JSONArray(
-                json
-            )
-
-
-        for (
-        i in
-        0 until
-                jsonArray.length()
-        ) {
-
-
-            val objectItem =
-                jsonArray
-                    .getJSONObject(
-                        i
-                    )
-
-
-            recentFiles.add(
-
-
-                RecentFile(
-
-
-                    name =
-                        objectItem
-                            .getString(
-                                "name"
-                            ),
-
-
-                    uri =
-                        objectItem
-                            .getString(
-                                "uri"
-                            )
-                )
-            )
-        }
-
-
-    } catch (
-        _: Exception
-    ) {
-
-
-        return emptyList()
-    }
-
-
-    return recentFiles
+    context
+        .getSharedPreferences(
+            "editor_recovery",
+            Context.MODE_PRIVATE
+        )
+        .edit()
+        .clear()
+        .apply()
 }
 
 
@@ -3317,9 +4944,7 @@ fun loadRecentFiles(
 @Composable
 fun EditorScreenPreview() {
 
-
     ModernTextEditorTheme {
-
 
         EditorScreen()
     }
