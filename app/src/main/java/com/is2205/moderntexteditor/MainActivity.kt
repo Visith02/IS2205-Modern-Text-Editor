@@ -186,9 +186,7 @@ fun EditorScreen() {
     // =================================================
 
     var fileName by remember {
-        mutableStateOf(
-            "untitled.txt"
-        )
+        mutableStateOf("untitled.txt")
     }
 
     var editorText by remember {
@@ -256,7 +254,7 @@ fun EditorScreen() {
 
 
     // =================================================
-    // DIFF VIEWER - M3.7
+    // DIFF VIEWER
     // =================================================
 
     var showDiffDialog by remember {
@@ -279,6 +277,27 @@ fun EditorScreen() {
         mutableStateOf<List<String>>(
             emptyList()
         )
+    }
+
+
+    // =================================================
+    // ROLLBACK - NEW M3.8
+    // =================================================
+
+    var showRollbackDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var rollbackTargetVersion by remember {
+        mutableStateOf<VersionEntity?>(null)
+    }
+
+    var rollbackTargetText by remember {
+        mutableStateOf("")
+    }
+
+    var isPreparingRollback by remember {
+        mutableStateOf(false)
     }
 
 
@@ -566,6 +585,12 @@ fun EditorScreen() {
                         diffLines =
                             emptyList()
 
+                        rollbackTargetVersion =
+                            null
+
+                        rollbackTargetText =
+                            ""
+
                         undoStack.clear()
                         redoStack.clear()
 
@@ -680,6 +705,12 @@ fun EditorScreen() {
 
                     diffLines =
                         emptyList()
+
+                    rollbackTargetVersion =
+                        null
+
+                    rollbackTargetText =
+                        ""
 
                     addRecentFile(
                         context,
@@ -1047,7 +1078,7 @@ fun EditorScreen() {
 
 
     // =================================================
-    // OPEN DIFF VIEWER - M3.7
+    // OPEN DIFF VIEWER
     // =================================================
 
     fun openDiffForVersion(
@@ -1175,6 +1206,176 @@ fun EditorScreen() {
                     false
             }
         }
+    }
+
+
+    // =================================================
+    // PREPARE ROLLBACK - NEW M3.8
+    // =================================================
+
+    fun prepareRollback(
+        version: VersionEntity
+    ) {
+
+        if (isReadOnly) {
+
+            statusMessage =
+                "Read-only mode: rollback disabled"
+
+            return
+        }
+
+        if (isPreparingRollback) {
+
+            return
+        }
+
+        isPreparingRollback =
+            true
+
+        statusMessage =
+            "Preparing rollback to Version ${version.versionNumber}..."
+
+        coroutineScope.launch {
+
+            try {
+
+                val historicalText =
+
+                    withContext(
+                        Dispatchers.IO
+                    ) {
+
+                        versionManager
+                            .reconstructVersion(
+                                documentKey =
+                                    documentKey,
+                                targetVersionNumber =
+                                    version.versionNumber
+                            )
+                    }
+
+                rollbackTargetVersion =
+                    version
+
+                rollbackTargetText =
+                    historicalText
+
+                showVersionHistoryDialog =
+                    false
+
+                showVersionPreviewDialog =
+                    false
+
+                showDiffDialog =
+                    false
+
+                showRollbackDialog =
+                    true
+
+                statusMessage =
+                    "Ready to rollback to Version ${version.versionNumber}"
+
+            } catch (
+                e: Exception
+            ) {
+
+                statusMessage =
+                    "Unable to prepare rollback: ${e.message}"
+
+            } finally {
+
+                isPreparingRollback =
+                    false
+            }
+        }
+    }
+
+
+    // =================================================
+    // CONFIRM ROLLBACK - NEW M3.8
+    // =================================================
+
+    fun confirmRollback() {
+
+        val targetVersion =
+            rollbackTargetVersion
+                ?: return
+
+        if (isReadOnly) {
+
+            showRollbackDialog =
+                false
+
+            statusMessage =
+                "Read-only mode: rollback disabled"
+
+            return
+        }
+
+        if (
+            editorText ==
+            rollbackTargetText
+        ) {
+
+            showRollbackDialog =
+                false
+
+            rollbackTargetVersion =
+                null
+
+            rollbackTargetText =
+                ""
+
+            statusMessage =
+                "Editor already matches Version ${targetVersion.versionNumber}"
+
+            return
+        }
+
+
+        // Keep current content in Undo.
+        // This allows rollback itself to be undone.
+
+        undoStack.add(
+            editorText
+        )
+
+        if (
+            undoStack.size > 100
+        ) {
+
+            undoStack.removeAt(0)
+        }
+
+        redoStack.clear()
+
+
+        // Restore historical content to working editor.
+
+        editorText =
+            rollbackTargetText
+
+
+        // Rollback changes the working copy,
+        // so it must be saved afterwards.
+
+        isDirty =
+            true
+
+
+        showRollbackDialog =
+            false
+
+        rollbackTargetVersion =
+            null
+
+        rollbackTargetText =
+            ""
+
+
+        statusMessage =
+            "Rolled back to Version ${targetVersion.versionNumber} - press Save"
     }
 
 
@@ -1318,6 +1519,12 @@ fun EditorScreen() {
 
                                     diffLines =
                                         emptyList()
+
+                                    rollbackTargetVersion =
+                                        null
+
+                                    rollbackTargetText =
+                                        ""
 
                                     undoStack.clear()
                                     redoStack.clear()
@@ -1555,7 +1762,9 @@ fun EditorScreen() {
 
                                     Text(
 
-                                        if (wordWrapEnabled) {
+                                        if (
+                                            wordWrapEnabled
+                                        ) {
 
                                             "Word Wrap: ON"
 
@@ -1653,7 +1862,9 @@ fun EditorScreen() {
 
                                     Text(
 
-                                        if (isReadOnly) {
+                                        if (
+                                            isReadOnly
+                                        ) {
 
                                             "Read-only Mode: ON"
 
@@ -1697,7 +1908,7 @@ fun EditorScreen() {
 
 
             // =================================================
-            // FILE INFORMATION CARD
+            // FILE INFORMATION
             // =================================================
 
             Surface(
@@ -1876,7 +2087,7 @@ fun EditorScreen() {
 
 
             // =================================================
-            // TEXT EDITOR
+            // EDITOR
             // =================================================
 
             EditorTextArea(
@@ -2018,7 +2229,9 @@ fun EditorScreen() {
 
                             text =
 
-                                if (wordWrapEnabled) {
+                                if (
+                                    wordWrapEnabled
+                                ) {
 
                                     "Wrap ON"
 
@@ -2149,6 +2362,12 @@ fun EditorScreen() {
                             diffLines =
                                 emptyList()
 
+                            rollbackTargetVersion =
+                                null
+
+                            rollbackTargetText =
+                                ""
+
                             undoStack.clear()
                             redoStack.clear()
 
@@ -2206,7 +2425,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // RECENT FILES DIALOG
+    // RECENT FILES
     // =====================================================
 
     if (showRecentDialog) {
@@ -2292,6 +2511,12 @@ fun EditorScreen() {
 
                                                     diffLines =
                                                         emptyList()
+
+                                                    rollbackTargetVersion =
+                                                        null
+
+                                                    rollbackTargetText =
+                                                        ""
 
                                                     undoStack.clear()
                                                     redoStack.clear()
@@ -2398,7 +2623,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // FIND / REPLACE DIALOG
+    // FIND / REPLACE
     // =====================================================
 
     if (showSearchDialog) {
@@ -2564,7 +2789,9 @@ fun EditorScreen() {
 
                                     searchResultMessage =
 
-                                        if (count > 0) {
+                                        if (
+                                            count > 0
+                                        ) {
 
                                             "$count match(es) found"
 
@@ -2608,7 +2835,9 @@ fun EditorScreen() {
                                                 true
                                         )
 
-                                    if (index >= 0) {
+                                    if (
+                                        index >= 0
+                                    ) {
 
                                         val newText =
 
@@ -2670,7 +2899,9 @@ fun EditorScreen() {
                                             searchText
                                         )
 
-                                    if (count > 0) {
+                                    if (
+                                        count > 0
+                                    ) {
 
                                         val newText =
 
@@ -2726,7 +2957,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // VERSION HISTORY DIALOG
+    // VERSION HISTORY
     // =====================================================
 
     if (showVersionHistoryDialog) {
@@ -2790,6 +3021,7 @@ fun EditorScreen() {
                                     .typography
                                     .bodySmall
                         )
+
 
                         Spacer(
 
@@ -3017,22 +3249,6 @@ fun EditorScreen() {
                                         ) {
 
 
-                                            Text(
-
-                                                text =
-                                                    "Tap card to preview",
-
-                                                style =
-                                                    MaterialTheme
-                                                        .typography
-                                                        .labelSmall
-                                            )
-
-
-                                            // =================================================
-                                            // NEW M3.7 BUTTON
-                                            // =================================================
-
                                             TextButton(
 
                                                 onClick = {
@@ -3048,7 +3264,44 @@ fun EditorScreen() {
                                                     "View Diff"
                                                 )
                                             }
+
+
+                                            // =========================================
+                                            // ROLLBACK BUTTON - NEW M3.8
+                                            // =========================================
+
+                                            TextButton(
+
+                                                onClick = {
+
+                                                    prepareRollback(
+                                                        version
+                                                    )
+                                                },
+
+                                                enabled =
+                                                    !isReadOnly &&
+                                                            !isPreparingRollback
+
+                                            ) {
+
+                                                Text(
+                                                    "Rollback"
+                                                )
+                                            }
                                         }
+
+
+                                        Text(
+
+                                            text =
+                                                "Tap card to preview",
+
+                                            style =
+                                                MaterialTheme
+                                                    .typography
+                                                    .labelSmall
+                                        )
                                     }
                                 }
                             }
@@ -3079,7 +3332,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // HISTORICAL VERSION PREVIEW
+    // HISTORICAL PREVIEW
     // =====================================================
 
     if (showVersionPreviewDialog) {
@@ -3204,7 +3457,7 @@ fun EditorScreen() {
 
 
     // =====================================================
-    // DIFF VIEWER DIALOG - NEW M3.7
+    // DIFF VIEWER
     // =====================================================
 
     if (showDiffDialog) {
@@ -3484,11 +3737,241 @@ fun EditorScreen() {
             }
         )
     }
+
+
+    // =====================================================
+    // ROLLBACK CONFIRMATION - NEW M3.8
+    // =====================================================
+
+    if (
+        showRollbackDialog &&
+        rollbackTargetVersion != null
+    ) {
+
+        val target =
+            rollbackTargetVersion!!
+
+
+        AlertDialog(
+
+            onDismissRequest = {
+
+                showRollbackDialog =
+                    false
+
+                rollbackTargetVersion =
+                    null
+
+                rollbackTargetText =
+                    ""
+
+                showVersionHistoryDialog =
+                    true
+            },
+
+            title = {
+
+                Text(
+                    "Rollback to Version ${target.versionNumber}?"
+                )
+            },
+
+            text = {
+
+                Column {
+
+
+                    Text(
+                        "The editor will restore the content from Version ${target.versionNumber}."
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                10.dp
+                            )
+                    )
+
+
+                    Text(
+
+                        text =
+                            "Existing versions will NOT be deleted.",
+
+                        fontWeight =
+                            FontWeight.Bold
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                8.dp
+                            )
+                    )
+
+
+                    Text(
+                        "After rollback, the document will be marked Unsaved. Press Save to write the restored content to the file."
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                8.dp
+                            )
+                    )
+
+
+                    Text(
+                        "You can then use Create Version to record the rollback as a new version."
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+
+                    Text(
+
+                        text =
+                            "Preview:",
+
+                        fontWeight =
+                            FontWeight.Bold
+                    )
+
+
+                    Spacer(
+
+                        modifier =
+                            Modifier.height(
+                                5.dp
+                            )
+                    )
+
+
+                    Surface(
+
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(
+                                    max =
+                                        180.dp
+                                ),
+
+                        shape =
+                            RoundedCornerShape(
+                                8.dp
+                            ),
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .surfaceVariant
+
+                    ) {
+
+
+                        Text(
+
+                            text =
+
+                                if (
+                                    rollbackTargetText.length >
+                                    500
+                                ) {
+
+                                    rollbackTargetText
+                                        .take(
+                                            500
+                                        ) + "..."
+
+                                } else {
+
+                                    rollbackTargetText
+                                },
+
+                            modifier =
+                                Modifier
+                                    .verticalScroll(
+                                        rememberScrollState()
+                                    )
+                                    .padding(
+                                        10.dp
+                                    ),
+
+                            fontFamily =
+                                FontFamily.Monospace
+                        )
+                    }
+                }
+            },
+
+            confirmButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        confirmRollback()
+                    }
+
+                ) {
+
+                    Text(
+                        "Rollback"
+                    )
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        showRollbackDialog =
+                            false
+
+                        rollbackTargetVersion =
+                            null
+
+                        rollbackTargetText =
+                            ""
+
+                        showVersionHistoryDialog =
+                            true
+
+                        statusMessage =
+                            "Rollback cancelled"
+                    }
+
+                ) {
+
+                    Text(
+                        "Cancel"
+                    )
+                }
+            }
+        )
+    }
 }
 
 
 // =====================================================
-// DIFF VIEWER TEXT - M3.7
+// DIFF VIEWER TEXT
 // =====================================================
 
 @Composable
@@ -3660,7 +4143,7 @@ fun DiffViewerText(
 
 
 // =====================================================
-// CREATE UNIFIED DIFF - M3.7
+// CREATE UNIFIED DIFF
 // =====================================================
 
 fun buildUnifiedDiff(
@@ -3750,7 +4233,7 @@ fun buildUnifiedDiff(
 
 
 // =====================================================
-// NORMALIZE TEXT FOR DIFF - M3.7
+// NORMALIZE TEXT FOR DIFF
 // =====================================================
 
 fun normalizeTextForDiff(
@@ -3793,7 +4276,9 @@ suspend fun getOrCreateDocument(
         )
 
 
-    if (existing != null) {
+    if (
+        existing != null
+    ) {
 
         return existing
     }
@@ -4055,7 +4540,9 @@ fun EditorTextArea(
                 )
 
 
-        if (wordWrapEnabled) {
+        if (
+            wordWrapEnabled
+        ) {
 
 
             TextField(
@@ -4073,7 +4560,9 @@ fun EditorTextArea(
 
                     Text(
 
-                        if (isReadOnly) {
+                        if (
+                            isReadOnly
+                        ) {
 
                             "Read-only document"
 
@@ -5287,7 +5776,9 @@ fun loadRecentFiles(
         }
 
 
-    } catch (_: Exception) {
+    } catch (
+        _: Exception
+    ) {
 
 
         emptyList()
