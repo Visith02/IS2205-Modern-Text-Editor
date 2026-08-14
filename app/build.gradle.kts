@@ -5,6 +5,7 @@ plugins {
 }
 
 android {
+
     namespace = "com.is2205.moderntexteditor"
 
     compileSdk {
@@ -14,7 +15,9 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.is2205.moderntexteditor"
+
+        applicationId =
+            "com.is2205.moderntexteditor"
 
         minSdk = 26
         targetSdk = 36
@@ -27,7 +30,9 @@ android {
     }
 
     buildTypes {
+
         release {
+
             isMinifyEnabled = false
 
             proguardFiles(
@@ -40,6 +45,7 @@ android {
     }
 
     compileOptions {
+
         sourceCompatibility =
             JavaVersion.VERSION_11
 
@@ -52,8 +58,10 @@ android {
     }
 }
 
+
 dependencies {
 
+    // Compose
     implementation(
         platform(
             libs.androidx.compose.bom
@@ -88,6 +96,7 @@ dependencies {
         libs.androidx.lifecycle.runtime.ktx
     )
 
+
     // Room
     implementation(
         libs.androidx.room.runtime
@@ -101,6 +110,14 @@ dependencies {
         libs.androidx.room.compiler
     )
 
+
+    // Delta-based version control
+    implementation(
+        libs.java.diff.utils
+    )
+
+
+    // Testing
     testImplementation(
         libs.junit
     )
